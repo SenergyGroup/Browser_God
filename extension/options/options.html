@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Data Gatherer Options</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background: #0d1117;
+        color: #e6edf3;
+        padding: 20px;
+      }
+      label {
+        display: block;
+        margin-bottom: 12px;
+      }
+      input, textarea {
+        width: 100%;
+        margin-top: 4px;
+        padding: 8px;
+        border-radius: 4px;
+        border: 1px solid #30363d;
+        background: #161b22;
+        color: #e6edf3;
+      }
+      button {
+        margin-top: 12px;
+        padding: 8px 12px;
+        background: #238636;
+        color: #fff;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #2ea043;
+      }
+      .hint {
+        font-size: 12px;
+        color: #7d8590;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Data Gatherer Options</h1>
+    <label>
+      Allowed origins (one per line)
+      <textarea id="allowed-origins" rows="6"></textarea>
+    </label>
+    <label>
+      Max commands per minute
+      <input type="number" id="max-commands" min="1" value="30" />
+    </label>
+    <label>
+      Max concurrent tabs
+      <input type="number" id="max-tabs" min="1" value="3" />
+    </label>
+    <label>
+      Max response body size (bytes)
+      <input type="number" id="max-bytes" min="1024" value="5242880" />
+      <div class="hint">Responses larger than this will be ignored.</div>
+    </label>
+    <button id="save">Save</button>
+    <div id="status" class="hint"></div>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>
