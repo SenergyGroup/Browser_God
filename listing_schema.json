@@ -1,0 +1,20 @@
+{
+  "source": "etsy",
+  "url": "https://www.etsy.com/listing/123",
+  "captured_at": "ISO8601",
+  "listing_id": "etsy_123",
+  "title": "string",
+  "description": "string",
+  "price_value": 14.99,
+  "price_currency": "USD",
+  "rating_value": 4.9,
+  "rating_count": 221,
+  "favorites": 812,
+  "tags": ["overlay", "vtuber", "twitch"],
+  "category": "Digital overlay",
+  "seller": {
+    "id": "shop_456",
+    "name": "Shop Name"
+  },
+  "image_urls": ["..."]
+}
