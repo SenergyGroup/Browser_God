@@ -1,0 +1,472 @@
+import { validateListingRecord, validateReviewRecord } from "../common/schemas.js";
+import { transformEtsyListing, transformEtsyReviews } from "../common/transformers.js";
+import { DEFAULT_SETTINGS } from "./settings.js";
+
+const COMMAND_TYPES = {
+  OPEN_URL: "OPEN_URL",
+  WAIT: "WAIT",
+  SCROLL_TO_BOTTOM: "SCROLL_TO_BOTTOM",
+  CLICK: "CLICK",
+  CAPTURE_JSON_FROM_DEVTOOLS: "CAPTURE_JSON_FROM_DEVTOOLS",
+  EXTRACT_SCHEMA: "EXTRACT_SCHEMA"
+};
+
+const ERROR_CODES = {
+  DOMAIN_NOT_ALLOWED: "DOMAIN_NOT_ALLOWED",
+  ATTACH_FAILED: "ATTACH_FAILED",
+  PARSING_ERROR: "PARSING_ERROR",
+  INVALID_COMMAND: "INVALID_COMMAND",
+  RATE_LIMITED: "RATE_LIMITED"
+};
+
+const commandQueue = [];
+let processing = false;
+const commandLogs = [];
+const activeTabSessions = new Map();
+const recentCommandTimestamps = [];
+
+function encodeBase64(text) {
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(text);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+chrome.runtime.onInstalled.addListener(async () => {
+  await chrome.storage.local.set({
+    settings: DEFAULT_SETTINGS,
+    logs: [],
+    commands: {},
+    results: {}
+  });
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "enqueueCommand") {
+    handleIncomingCommand(message.command)
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+  if (message?.type === "getExtensionState") {
+    getExtensionState().then(sendResponse);
+    return true;
+  }
+  if (message?.type === "toggleAgentControl") {
+    toggleAgentControl(message.enabled).then(sendResponse);
+    return true;
+  }
+  if (message?.type === "exportData") {
+    exportCapturedData().then(sendResponse).catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+  return false;
+});
+
+async function handleIncomingCommand(command) {
+  if (!command?.id || !command?.type) {
+    throw new Error("Command must include id and type");
+  }
+
+  const settings = await getSettings();
+  if (!settings.agentControlEnabled) {
+    throw new Error("Agent control is disabled");
+  }
+
+  enforceRateLimit(settings);
+
+  if (!isCommandDomainAllowed(command, settings)) {
+    await logCommand(command, "rejected", ERROR_CODES.DOMAIN_NOT_ALLOWED);
+    return { status: "rejected", error: ERROR_CODES.DOMAIN_NOT_ALLOWED };
+  }
+
+  commandQueue.push(command);
+  processQueue();
+  return { status: "queued" };
+}
+
+async function getSettings() {
+  const { settings } = await chrome.storage.local.get({ settings: DEFAULT_SETTINGS });
+  return { ...DEFAULT_SETTINGS, ...settings };
+}
+
+async function getExtensionState() {
+  const settings = await getSettings();
+  const { logs } = await chrome.storage.local.get({ logs: [] });
+  return {
+    settings,
+    queueLength: commandQueue.length,
+    processing,
+    logs: logs.slice(-20)
+  };
+}
+
+async function toggleAgentControl(enabled) {
+  const settings = await getSettings();
+  const next = { ...settings, agentControlEnabled: Boolean(enabled) };
+  await chrome.storage.local.set({ settings: next });
+  return { ok: true, settings: next };
+}
+
+function enforceRateLimit(settings) {
+  const now = Date.now();
+  const cutoff = now - 60000;
+  while (recentCommandTimestamps.length && recentCommandTimestamps[0] < cutoff) {
+    recentCommandTimestamps.shift();
+  }
+  if (recentCommandTimestamps.length >= settings.maxCommandsPerMinute) {
+    throw new Error(ERROR_CODES.RATE_LIMITED);
+  }
+  recentCommandTimestamps.push(now);
+}
+
+function isCommandDomainAllowed(command, settings) {
+  if (!command?.payload?.url) {
+    return true;
+  }
+  try {
+    const url = new URL(command.payload.url);
+    return settings.allowedOrigins.some((origin) => matchesOrigin(url, origin));
+  } catch (error) {
+    return false;
+  }
+}
+
+function matchesOrigin(url, originPattern) {
+  if (!originPattern) {
+    return false;
+  }
+  const normalizedPattern = originPattern.replace(/^https?:\/\//i, "").replace(/\/$/, "").toLowerCase();
+  const hostname = url.hostname.toLowerCase();
+  if (normalizedPattern.startsWith("*.")) {
+    const domain = normalizedPattern.slice(2);
+    return hostname === domain || hostname.endsWith(`.${domain}`);
+  }
+  return hostname === normalizedPattern || hostname.endsWith(`.${normalizedPattern}`);
+}
+
+async function processQueue() {
+  if (processing) {
+    return;
+  }
+  processing = true;
+  while (commandQueue.length) {
+    const command = commandQueue.shift();
+    const result = await executeCommand(command);
+    await storeResult(command, result);
+    await logCommand(command, result.status, result.errorCode);
+    notifyResult(command, result);
+  }
+  processing = false;
+}
+
+async function executeCommand(command) {
+  const settings = await getSettings();
+  try {
+    switch (command.type) {
+      case COMMAND_TYPES.OPEN_URL:
+        return await handleOpenUrl(command, settings);
+      case COMMAND_TYPES.WAIT:
+        return await handleWait(command);
+      case COMMAND_TYPES.SCROLL_TO_BOTTOM:
+        return await handleDomAction(command, "SCROLL_TO_BOTTOM");
+      case COMMAND_TYPES.CLICK:
+        return await handleDomAction(command, "CLICK");
+      case COMMAND_TYPES.CAPTURE_JSON_FROM_DEVTOOLS:
+        return await handleCaptureJson(command, settings);
+      case COMMAND_TYPES.EXTRACT_SCHEMA:
+        return await handleExtractSchema(command);
+      default:
+        return { status: "failed", errorCode: ERROR_CODES.INVALID_COMMAND };
+    }
+  } catch (error) {
+    console.error("Command execution failed", command, error);
+    return { status: "failed", errorCode: error.message || "UNKNOWN_ERROR" };
+  }
+}
+
+async function handleOpenUrl(command, settings) {
+  const url = command?.payload?.url;
+  if (!url) {
+    return { status: "failed", errorCode: ERROR_CODES.INVALID_COMMAND };
+  }
+
+  const openTabs = Array.from(activeTabSessions.keys()).length;
+  if (openTabs >= settings.maxConcurrentTabs) {
+    return { status: "failed", errorCode: "TOO_MANY_TABS" };
+  }
+
+  const tab = await chrome.tabs.create({ url, active: false });
+  const tabId = tab.id;
+
+  const loadResult = await waitForTabLoad(tabId);
+  if (!loadResult) {
+    return { status: "failed", errorCode: "NAVIGATION_TIMEOUT" };
+  }
+
+  const attachResult = await attachDebugger(tabId, command.id);
+  if (!attachResult.ok) {
+    await chrome.tabs.remove(tabId);
+    return { status: "failed", errorCode: ERROR_CODES.ATTACH_FAILED };
+  }
+
+  activeTabSessions.set(tabId, {
+    commandId: command.id,
+    capturedBodies: [],
+    transformers: getTransformersForHost(new URL(url).hostname),
+    settings
+  });
+
+  if (Array.isArray(command.payload?.actions)) {
+    for (const action of command.payload.actions) {
+      const actionCommand = { id: `${command.id}:${action.type}`, type: action.type, payload: { ...action.payload, tabId } };
+      const actionResult = await executeCommand(actionCommand);
+      if (actionResult.status !== "completed") {
+        console.warn("Action failed", action, actionResult);
+      }
+    }
+  }
+
+  return { status: "completed", tabId };
+}
+
+async function waitForTabLoad(tabId) {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve(false);
+    }, 30000);
+
+    const listener = (updatedTabId, changeInfo) => {
+      if (updatedTabId === tabId && changeInfo.status === "complete") {
+        clearTimeout(timeout);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve(true);
+      }
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+async function attachDebugger(tabId, commandId) {
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+  } catch (error) {
+    console.error("Failed to attach debugger", error);
+    return { ok: false };
+  }
+  await chrome.debugger.sendCommand({ tabId }, "Network.enable", {});
+  await chrome.debugger.sendCommand({ tabId }, "Page.enable", {});
+  chrome.debugger.onEvent.addListener(onDebuggerEvent);
+  return { ok: true };
+}
+
+function getTransformersForHost(hostname) {
+  if (hostname.endsWith("etsy.com")) {
+    return {
+      listings: transformEtsyListing,
+      reviews: transformEtsyReviews
+    };
+  }
+  return {};
+}
+
+async function handleWait(command) {
+  const ms = command?.payload?.milliseconds ?? 1000;
+  await new Promise((resolve) => setTimeout(resolve, ms));
+  return { status: "completed" };
+}
+
+async function handleDomAction(command, actionType) {
+  const tabId = command?.payload?.tabId ?? command?.payload?.targetTabId;
+  if (!tabId) {
+    return { status: "failed", errorCode: ERROR_CODES.INVALID_COMMAND };
+  }
+
+  const payload = { type: actionType, payload: command.payload };
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, payload);
+    return response?.ok ? { status: "completed", data: response.data } : { status: "failed", errorCode: response?.error || "CONTENT_SCRIPT_ERROR" };
+  } catch (error) {
+    console.error("DOM action failed", error);
+    return { status: "failed", errorCode: error.message };
+  }
+}
+
+async function handleCaptureJson(command, settings) {
+  const tabId = command?.payload?.tabId;
+  if (!tabId || !activeTabSessions.has(tabId)) {
+    return { status: "failed", errorCode: ERROR_CODES.INVALID_COMMAND };
+  }
+
+  const session = activeTabSessions.get(tabId);
+  session.captureMode = command.payload?.captureType || "listings";
+  session.capturedBodies = [];
+
+  const waitMs = command.payload?.waitForMs ?? 5000;
+  await new Promise((resolve) => setTimeout(resolve, waitMs));
+
+  const parsedRecords = [];
+  for (const body of session.capturedBodies) {
+    if (body.raw.length > settings.maxResponseBodyBytes) {
+      continue;
+    }
+    try {
+      const json = JSON.parse(body.raw);
+      const transformed = applyTransformers(session, json, body.url);
+      for (const record of transformed) {
+        if (record.source === "etsy" && record.listing_id) {
+          if (validateListingRecord(record)) {
+            parsedRecords.push(record);
+          }
+        } else if (record.review_id && validateReviewRecord(record)) {
+          parsedRecords.push(record);
+        }
+      }
+    } catch (error) {
+      console.warn("Failed to parse response", error);
+    }
+  }
+
+  await chrome.debugger.detach({ tabId }).catch((error) => console.warn("Failed to detach", error));
+  activeTabSessions.delete(tabId);
+
+  if (command.payload?.closeTab !== false) {
+    await chrome.tabs.remove(tabId).catch((error) => console.warn("Failed to close tab", error));
+  }
+
+  return { status: "completed", records: parsedRecords };
+}
+
+function applyTransformers(session, json, url) {
+  const results = [];
+  if (session.captureMode === "listings" && session.transformers.listings) {
+    const transformed = session.transformers.listings(json, url);
+    if (Array.isArray(transformed)) {
+      results.push(...transformed);
+    } else if (transformed) {
+      results.push(transformed);
+    }
+  }
+  if (session.captureMode === "reviews" && session.transformers.reviews) {
+    const transformed = session.transformers.reviews(json, url);
+    if (Array.isArray(transformed)) {
+      results.push(...transformed);
+    } else if (transformed) {
+      results.push(transformed);
+    }
+  }
+  return results;
+}
+
+async function handleExtractSchema(command) {
+  const tabId = command?.payload?.tabId;
+  if (!tabId) {
+    return { status: "failed", errorCode: ERROR_CODES.INVALID_COMMAND };
+  }
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, { type: "EXTRACT_SCHEMA", payload: command.payload });
+    if (response?.ok) {
+      return { status: "completed", data: response.data };
+    }
+    return { status: "failed", errorCode: response?.error || "EXTRACTION_FAILED" };
+  } catch (error) {
+    console.error("Schema extraction failed", error);
+    return { status: "failed", errorCode: error.message };
+  }
+}
+
+function onDebuggerEvent(source, method, params) {
+  if (!source.tabId || !activeTabSessions.has(source.tabId)) {
+    return;
+  }
+  if (method === "Network.responseReceived") {
+    handleResponseReceived(source.tabId, params);
+  }
+}
+
+async function handleResponseReceived(tabId, params) {
+  const session = activeTabSessions.get(tabId);
+  if (!session) {
+    return;
+  }
+  const { response, requestId } = params;
+  if (!response || !response.mimeType?.includes("json")) {
+    return;
+  }
+  const url = response.url || "";
+  if (!isUrlRelevant(url)) {
+    return;
+  }
+  try {
+    const { body, base64Encoded } = await chrome.debugger.sendCommand({ tabId }, "Network.getResponseBody", { requestId });
+    const raw = base64Encoded ? atob(body) : body;
+    session.capturedBodies.push({ url, raw });
+  } catch (error) {
+    console.warn("Failed to read response body", error);
+  }
+}
+
+function isUrlRelevant(url) {
+  return /etsy\.com/.test(url);
+}
+
+async function storeResult(command, result) {
+  const { results } = await chrome.storage.local.get({ results: {} });
+  results[command.id] = result;
+  await chrome.storage.local.set({ results });
+}
+
+async function logCommand(command, status, errorCode) {
+  const logEntry = {
+    id: command.id,
+    type: command.type,
+    status,
+    errorCode: errorCode || null,
+    timestamp: new Date().toISOString(),
+    url: command.payload?.url || command.payload?.tabId || null
+  };
+  commandLogs.push(logEntry);
+  if (commandLogs.length > 100) {
+    commandLogs.shift();
+  }
+  const { logs } = await chrome.storage.local.get({ logs: [] });
+  logs.push(logEntry);
+  if (logs.length > 200) {
+    logs.splice(0, logs.length - 200);
+  }
+  await chrome.storage.local.set({ logs });
+}
+
+function notifyResult(command, result) {
+  chrome.runtime.sendMessage({ type: "commandResult", commandId: command.id, result }).catch(() => {});
+}
+
+async function exportCapturedData() {
+  const { results } = await chrome.storage.local.get({ results: {} });
+  const chunks = [];
+  Object.entries(results).forEach(([commandId, record]) => {
+    if (Array.isArray(record.records)) {
+      record.records.forEach((item) => chunks.push(JSON.stringify({ commandId, ...item })));
+    }
+  });
+  const payload = chunks.join("\n");
+  const encoded = encodeBase64(payload);
+  const url = `data:application/x-ndjson;base64,${encoded}`;
+  await chrome.downloads.download({
+    url,
+    filename: `captured_data_${Date.now()}.jsonl`,
+    saveAs: true
+  });
+  return { ok: true };
+}
+
+chrome.runtime.onSuspend.addListener(() => {
+  for (const tabId of activeTabSessions.keys()) {
+    chrome.debugger.detach({ tabId }).catch(() => {});
+  }
+  activeTabSessions.clear();
+});
