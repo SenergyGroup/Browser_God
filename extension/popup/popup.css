@@ -56,6 +56,14 @@ section h2 {
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 
+#internal-tools {
+  margin-top: 12px;
+}
+
+#internal-tools button {
+  width: 100%;
+}
+
 footer {
   margin-top: 12px;
   display: flex;

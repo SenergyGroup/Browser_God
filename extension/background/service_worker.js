@@ -45,25 +45,47 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type === "enqueueCommand") {
-    handleIncomingCommand(message.command)
-      .then((result) => sendResponse({ ok: true, result }))
-      .catch((error) => sendResponse({ ok: false, error: error.message }));
-    return true;
-  }
-  if (message?.type === "getExtensionState") {
-    getExtensionState().then(sendResponse);
-    return true;
-  }
-  if (message?.type === "toggleAgentControl") {
-    toggleAgentControl(message.enabled).then(sendResponse);
-    return true;
-  }
-  if (message?.type === "exportData") {
-    exportCapturedData().then(sendResponse).catch((error) => sendResponse({ ok: false, error: error.message }));
-    return true;
-  }
-  return false;
+  const messageType = message?.type;
+  console.log("Service worker received message", messageType, message);
+
+  (async () => {
+    switch (messageType) {
+      case "enqueueCommand": {
+        const result = await handleIncomingCommand(message.command);
+        sendResponse({ ok: true, result });
+        return;
+      }
+      case "getExtensionState": {
+        const state = await getExtensionState();
+        sendResponse(state);
+        return;
+      }
+      case "toggleAgentControl": {
+        const result = await toggleAgentControl(message.enabled);
+        sendResponse(result);
+        return;
+      }
+      case "exportData": {
+        try {
+          const result = await exportCapturedData();
+          sendResponse(result);
+        } catch (error) {
+          sendResponse({ ok: false, error: error.message });
+        }
+        return;
+      }
+      default: {
+        console.warn("Unknown message type", messageType);
+        sendResponse({ ok: false, error: "UNKNOWN_MESSAGE_TYPE" });
+        return;
+      }
+    }
+  })().catch((error) => {
+    console.error("Failed to handle runtime message", messageType, error);
+    sendResponse({ ok: false, error: error?.message || "INTERNAL_ERROR" });
+  });
+
+  return true;
 });
 
 async function handleIncomingCommand(command) {
