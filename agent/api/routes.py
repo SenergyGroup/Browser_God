@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 
-from ..README_handler import ReadmeSchemaParser
+from ..documentation import get_schema_documentation
 from ..messaging.bridge import ExtensionBridge
 from ..messaging.events import EventBroker
 from ..schemas.command import RunCommandRequest, ToggleAgentControlRequest
@@ -26,12 +26,6 @@ def get_event_broker() -> EventBroker:
     from ..main import event_broker
 
     return event_broker
-
-
-def get_readme_parser() -> ReadmeSchemaParser:
-    from ..main import readme_parser
-
-    return readme_parser
 
 
 @router.post("/run-command")
@@ -71,12 +65,8 @@ async def toggle_agent_control(
 
 
 @router.get("/schema")
-async def get_schema(readme: ReadmeSchemaParser = Depends(get_readme_parser)) -> Dict[str, Any]:
-    try:
-        return readme.to_dict()
-    except Exception as error:  # noqa: BLE001
-        LOGGER.exception("Failed to load README schema")
-        raise HTTPException(status_code=500, detail=str(error))
+async def get_schema() -> Dict[str, Any]:
+    return get_schema_documentation()
 
 
 @router.websocket("/ws/extension")
