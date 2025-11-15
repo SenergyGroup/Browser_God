@@ -21,7 +21,7 @@ class ReadmeSchemaParser:
     """Parse the external agent README file for schema metadata."""
 
     COMMAND_TYPES_PATTERN = re.compile(
-        r"`type` must match one of the service worker command handlers:\s*`([^`]+)`",
+        r"`type` must match one of the service worker command handlers:\s*((?:`[^`]+`(?:,\s*)?)*)",
         re.IGNORECASE,
     )
 
@@ -83,13 +83,34 @@ class ReadmeSchemaParser:
     @staticmethod
     def _strip_json_comments(snippet: str) -> str:
         cleaned_lines = []
-        for line in snippet.strip().splitlines():
+        for raw_line in snippet.strip().splitlines():
+            line = raw_line.rstrip("\n\r")
             stripped = line.strip()
-            if not stripped or stripped.startswith("//"):
+            if not stripped:
                 continue
-            if "//" in line:
-                line = line.split("//", 1)[0].rstrip()
-            cleaned_lines.append(line)
+            if stripped.startswith("//"):
+                continue
+            cleaned_line = []
+            in_string = False
+            escape = False
+            i = 0
+            while i < len(line):
+                char = line[i]
+                if char == "\\" and not escape:
+                    escape = True
+                    cleaned_line.append(char)
+                    i += 1
+                    continue
+                if char == '"' and not escape:
+                    in_string = not in_string
+                if not in_string and char == "/" and i + 1 < len(line) and line[i + 1] == "/":
+                    break
+                cleaned_line.append(char)
+                escape = False
+                i += 1
+            final = "".join(cleaned_line).rstrip()
+            if final:
+                cleaned_lines.append(final)
         return "\n" + "\n".join(cleaned_lines) + "\n"
 
     @classmethod
@@ -98,8 +119,7 @@ class ReadmeSchemaParser:
         if not match:
             return []
         raw = match.group(1)
-        parts = [p.strip() for p in raw.split("`, `")]
-        return [part.replace("`", "") for part in parts if part]
+        return [value for value in re.findall(r"`([^`]+)`", raw)]
 
 
 __all__ = ["ReadmeSchemaParser", "CommandDocumentation"]
