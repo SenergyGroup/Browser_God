@@ -5,7 +5,7 @@ import uuid
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, root_validator, validator
+from pydantic import BaseModel, Field, model_validator
 
 
 class CommandType(str, Enum):
@@ -23,14 +23,18 @@ class CommandAction(BaseModel):
     type: CommandType
     payload: Dict[str, Any] = Field(default_factory=dict)
 
-    @validator("payload")
-    def validate_payload(cls, payload: Dict[str, Any], values: Dict[str, Any]) -> Dict[str, Any]:
-        action_type: CommandType = values.get("type")  # type: ignore[assignment]
+    @model_validator(mode="after")
+    def validate_payload(cls, model: "CommandAction") -> "CommandAction":
+        action_type = model.type
+        payload = model.payload or {}
+
         if action_type == CommandType.WAIT:
             milliseconds = payload.get("milliseconds")
             if milliseconds is not None and (not isinstance(milliseconds, int) or milliseconds < 0):
                 raise ValueError("WAIT action requires a non-negative integer 'milliseconds'")
-        return payload
+
+        model.payload = payload
+        return model
 
 
 class Command(BaseModel):
@@ -40,10 +44,10 @@ class Command(BaseModel):
     type: CommandType
     payload: Dict[str, Any]
 
-    @root_validator
-    def validate_payload(cls, values: Dict[str, Any]) -> Dict[str, Any]:
-        payload = values.get("payload") or {}
-        command_type: CommandType = values.get("type")  # type: ignore[assignment]
+    @model_validator(mode="after")
+    def validate_payload(cls, model: "Command") -> "Command":
+        payload = model.payload or {}
+        command_type = model.type
 
         if command_type == CommandType.OPEN_URL:
             url = payload.get("url")
@@ -57,7 +61,7 @@ class Command(BaseModel):
                     action if isinstance(action, CommandAction) else CommandAction(**action)
                     for action in actions
                 ]
-                payload["actions"] = [action.dict() for action in validated_actions]
+                payload["actions"] = [action.model_dump() for action in validated_actions]
         elif command_type == CommandType.WAIT:
             milliseconds = payload.get("milliseconds")
             if milliseconds is not None and (not isinstance(milliseconds, int) or milliseconds < 0):
@@ -73,8 +77,9 @@ class Command(BaseModel):
             # For now we accept arbitrary payloads documented elsewhere.
             if not isinstance(payload, dict):
                 raise ValueError("Command payload must be an object")
-        values["payload"] = payload
-        return values
+
+        model.payload = payload
+        return model
 
 
 class EnqueueCommandRequest(BaseModel):
