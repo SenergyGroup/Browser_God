@@ -44,6 +44,11 @@
   <body>
     <h1>Data Gatherer Options</h1>
     <label>
+      Agent WebSocket URL
+      <input type="text" id="agent-url" value="ws://localhost:8000/ws/extension" />
+      <div class="hint">Used for real-time bridge to the local agent.</div>
+    </label>
+    <label>
       Allowed origins (one per line)
       <textarea id="allowed-origins" rows="6"></textarea>
     </label>

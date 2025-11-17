@@ -1,6 +1,7 @@
 import { validateListingRecord, validateReviewRecord } from "../common/schemas.js";
 import { transformEtsyListing, transformEtsyReviews } from "../common/transformers.js";
 import { DEFAULT_SETTINGS } from "./settings.js";
+import { AgentBridge } from "./agent_bridge.js";
 
 const COMMAND_TYPES = {
   OPEN_URL: "OPEN_URL",
@@ -24,6 +25,8 @@ let processing = false;
 const commandLogs = [];
 const activeTabSessions = new Map();
 const recentCommandTimestamps = [];
+let bridgeStatus = "disconnected";
+let agentBridge;
 
 function encodeBase64(text) {
   const encoder = new TextEncoder();
@@ -44,42 +47,27 @@ chrome.runtime.onInstalled.addListener(async () => {
   });
 });
 
+function initializeAgentBridge() {
+  agentBridge = new AgentBridge({
+    getSettings,
+    getExtensionState,
+    handleAgentRequest: handleControlMessage,
+    onStatusChange: (status) => {
+      bridgeStatus = status;
+      broadcastExtensionState();
+    }
+  });
+
+  agentBridge.start();
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const messageType = message?.type;
   console.log("Service worker received message", messageType, message);
 
   (async () => {
-    switch (messageType) {
-      case "enqueueCommand": {
-        const result = await handleIncomingCommand(message.command);
-        sendResponse({ ok: true, result });
-        return;
-      }
-      case "getExtensionState": {
-        const state = await getExtensionState();
-        sendResponse(state);
-        return;
-      }
-      case "toggleAgentControl": {
-        const result = await toggleAgentControl(message.enabled);
-        sendResponse(result);
-        return;
-      }
-      case "exportData": {
-        try {
-          const result = await exportCapturedData();
-          sendResponse(result);
-        } catch (error) {
-          sendResponse({ ok: false, error: error.message });
-        }
-        return;
-      }
-      default: {
-        console.warn("Unknown message type", messageType);
-        sendResponse({ ok: false, error: "UNKNOWN_MESSAGE_TYPE" });
-        return;
-      }
-    }
+    const response = await handleControlMessage(message);
+    sendResponse(response);
   })().catch((error) => {
     console.error("Failed to handle runtime message", messageType, error);
     sendResponse({ ok: false, error: error?.message || "INTERNAL_ERROR" });
@@ -107,7 +95,34 @@ async function handleIncomingCommand(command) {
 
   commandQueue.push(command);
   processQueue();
+  await broadcastExtensionState();
   return { status: "queued" };
+}
+
+async function handleControlMessage(message) {
+  switch (message?.type) {
+    case "enqueueCommand": {
+      const result = await handleIncomingCommand(message.command);
+      return { ok: true, result };
+    }
+    case "getExtensionState": {
+      return await getExtensionState();
+    }
+    case "toggleAgentControl": {
+      return await toggleAgentControl(message.enabled);
+    }
+    case "exportData": {
+      try {
+        return await exportCapturedData();
+      } catch (error) {
+        return { ok: false, error: error.message };
+      }
+    }
+    default: {
+      console.warn("Unknown message type", message?.type);
+      return { ok: false, error: "UNKNOWN_MESSAGE_TYPE" };
+    }
+  }
 }
 
 async function getSettings() {
@@ -122,14 +137,29 @@ async function getExtensionState() {
     settings,
     queueLength: commandQueue.length,
     processing,
-    logs: logs.slice(-20)
+    logs: logs.slice(-20),
+    bridgeStatus
   };
+}
+
+async function broadcastExtensionState() {
+  if (!agentBridge) {
+    return;
+  }
+
+  try {
+    const state = await getExtensionState();
+    agentBridge.emit({ type: "extensionState", payload: state });
+  } catch (error) {
+    console.warn("Failed to broadcast extension state", error);
+  }
 }
 
 async function toggleAgentControl(enabled) {
   const settings = await getSettings();
   const next = { ...settings, agentControlEnabled: Boolean(enabled) };
   await chrome.storage.local.set({ settings: next });
+  await broadcastExtensionState();
   return { ok: true, settings: next };
 }
 
@@ -175,14 +205,17 @@ async function processQueue() {
     return;
   }
   processing = true;
+  await broadcastExtensionState();
   while (commandQueue.length) {
     const command = commandQueue.shift();
     const result = await executeCommand(command);
     await storeResult(command, result);
     await logCommand(command, result.status, result.errorCode);
     notifyResult(command, result);
+    await broadcastExtensionState();
   }
   processing = false;
+  await broadcastExtensionState();
 }
 
 async function executeCommand(command) {
@@ -465,6 +498,9 @@ async function logCommand(command, status, errorCode) {
 
 function notifyResult(command, result) {
   chrome.runtime.sendMessage({ type: "commandResult", commandId: command.id, result }).catch(() => {});
+  if (agentBridge) {
+    agentBridge.emit({ type: "commandResult", commandId: command.id, result });
+  }
 }
 
 async function exportCapturedData() {
@@ -492,3 +528,5 @@ chrome.runtime.onSuspend.addListener(() => {
   }
   activeTabSessions.clear();
 });
+
+initializeAgentBridge();
