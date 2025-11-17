@@ -6,6 +6,7 @@ async function loadSettings() {
   document.getElementById("max-commands").value = settings.maxCommandsPerMinute || DEFAULT_SETTINGS.maxCommandsPerMinute;
   document.getElementById("max-tabs").value = settings.maxConcurrentTabs || DEFAULT_SETTINGS.maxConcurrentTabs;
   document.getElementById("max-bytes").value = settings.maxResponseBodyBytes || DEFAULT_SETTINGS.maxResponseBodyBytes;
+  document.getElementById("agent-url").value = settings.agentWebSocketUrl || DEFAULT_SETTINGS.agentWebSocketUrl;
 }
 
 async function saveSettings() {
@@ -18,7 +19,8 @@ async function saveSettings() {
     allowedOrigins: origins,
     maxCommandsPerMinute: Number(document.getElementById("max-commands").value) || DEFAULT_SETTINGS.maxCommandsPerMinute,
     maxConcurrentTabs: Number(document.getElementById("max-tabs").value) || DEFAULT_SETTINGS.maxConcurrentTabs,
-    maxResponseBodyBytes: Number(document.getElementById("max-bytes").value) || DEFAULT_SETTINGS.maxResponseBodyBytes
+    maxResponseBodyBytes: Number(document.getElementById("max-bytes").value) || DEFAULT_SETTINGS.maxResponseBodyBytes,
+    agentWebSocketUrl: document.getElementById("agent-url").value || DEFAULT_SETTINGS.agentWebSocketUrl
   };
   const { settings } = await chrome.storage.local.get({ settings: DEFAULT_SETTINGS });
   await chrome.storage.local.set({ settings: { ...settings, ...next } });
