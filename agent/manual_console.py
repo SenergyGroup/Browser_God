@@ -5,10 +5,13 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Dict
 
 import httpx
 import websockets
+
+from .schemas.command import CommandType
 
 LOGGER = logging.getLogger(__name__)
 
@@ -71,6 +74,9 @@ class ManualConsole:
             if command == "state":
                 await self._show_state()
                 continue
+            if command.startswith("ai_task "):
+                await self._run_ai_task(command)
+                continue
             if command.startswith("toggle"):
                 await self._toggle(command)
                 continue
@@ -128,6 +134,68 @@ class ManualConsole:
         except Exception as error:  # noqa: BLE001
             print(f"Failed to fetch state: {error}")
 
+    async def _run_ai_task(self, command: str) -> None:
+        parts = command.split(maxsplit=1)
+        if len(parts) != 2 or not parts[1].strip():
+            print('Usage: ai_task "<search topic>"')
+            return
+
+        topic = parts[1].strip().strip('"')
+        search_terms = await self._generate_search_terms(topic)
+        if not search_terms:
+            print("Failed to generate search terms")
+            return
+
+        payload = {"searchTerms": search_terms}
+        await self._send_command(CommandType.EXECUTE_SEARCH_TASK.value, payload)
+
+    async def _generate_search_terms(self, topic: str) -> list[str]:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            print("Missing OPENAI_API_KEY environment variable")
+            return []
+
+        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        system_prompt = (
+            "You generate concise Etsy search queries. Return ONLY a JSON array of 5-10 short, "
+            "diverse search terms relevant to the provided topic."
+        )
+        user_prompt = f"Topic: {topic}\nReturn only the JSON array."
+
+        try:
+            async with httpx.AsyncClient(timeout=45) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        "temperature": 0.7,
+                        "max_tokens": 256
+                    }
+                )
+                response.raise_for_status()
+                content = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+        except Exception as error:  # noqa: BLE001
+            print(f"LLM request failed: {error}")
+            return []
+
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            try:
+                cleaned = content[content.index("[") : content.rindex("]") + 1]
+                parsed = json.loads(cleaned)
+            except Exception:  # noqa: BLE001
+                print("LLM response was not valid JSON")
+                return []
+
+        search_terms = [term.strip() for term in parsed if isinstance(term, str) and term.strip()]
+        return search_terms[:10]
+
     async def _send_command(self, command_type: str, payload: Dict[str, Any]) -> None:
         body = {"type": command_type, "payload": payload}
         try:
@@ -172,6 +240,7 @@ class ManualConsole:
 Available commands:
   state                 Show extension state via /state
   toggle <on|off>       Enable or disable agent control
+  ai_task "<topic>"       Generate search terms and run EXECUTE_SEARCH_TASK
   open <url>            Queue a basic OPEN_URL command
   run <TYPE> {json}     Queue any command with optional JSON payload
   help                  Show this help message
