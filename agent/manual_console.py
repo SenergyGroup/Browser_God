@@ -146,6 +146,11 @@ class ManualConsole:
             print("Failed to generate search terms")
             return
 
+        LOGGER.info(
+            "Generated %s search terms: %s. Sending to extension.",
+            len(search_terms),
+            search_terms,
+        )
         payload = {"searchTerms": search_terms}
         await self._send_command(CommandType.EXECUTE_SEARCH_TASK.value, payload)
 
@@ -202,7 +207,10 @@ class ManualConsole:
             response = await self.client.post("/run-command", json=body)
             response.raise_for_status()
             data = response.json()
-            print(f"Queued command {data.get('commandId')}: {data.get('result')}")
+            print(
+                "Queued command %s (%s): %s"
+                % (command_type, data.get("commandId"), data.get("result"))
+            )
         except Exception as error:  # noqa: BLE001
             print(f"Command failed: {error}")
 
