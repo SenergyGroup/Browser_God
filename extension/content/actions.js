@@ -38,6 +38,22 @@ async function clickSelector({ selector, maxTimes = 1, delay = 250 }) {
   return { ok: true, data: { clicks } };
 }
 
+function safeParseJsonAttribute(value) {
+  if (!value) {
+    return null;
+  }
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    try {
+      return JSON.parse(value.replace(/&quot;/g, '"'));
+    } catch (secondaryError) {
+      console.warn("Failed to parse JSON attribute", secondaryError);
+      return null;
+    }
+  }
+}
+
 function extractSchemas({ types = ["application/ld+json"] }) {
   if (isEtsySearchPage()) {
     return { ok: true, data: { listings: extractEtsyListings() } };
@@ -114,6 +130,88 @@ function extractImageUrls(card) {
   return Array.from(new Set(urls));
 }
 
+function extractImageAlts(card) {
+  const imgs = Array.from(card.querySelectorAll("img"));
+  const alts = imgs.map((img) => img.getAttribute("alt") || "").filter((alt) => alt && alt.trim().length > 0);
+  return Array.from(new Set(alts));
+}
+
+function extractBadges(card) {
+  const badgeCandidates = [
+    ...Array.from(card.querySelectorAll("[data-badge]")),
+    ...Array.from(card.querySelectorAll(".wt-badge, .listing-card-badge")),
+    ...Array.from(card.querySelectorAll("[aria-label*='Free shipping' i]"))
+  ];
+  const badges = badgeCandidates
+    .map((node) => node.textContent?.trim())
+    .filter((text) => text && text.length > 0);
+  return Array.from(new Set(badges));
+}
+
+function parseAppearsEventData(card) {
+  const container = card.closest("[data-appears-event-data]");
+  if (!container) {
+    return { query: "", appearsEventData: null };
+  }
+
+  const raw = container.getAttribute("data-appears-event-data");
+  const parsed = safeParseJsonAttribute(raw);
+  return {
+    query: parsed?.common?.query || "",
+    appearsEventData: parsed
+  };
+}
+
+function parseDiscount(discountText, priceValue, originalValue) {
+  const discountMatch = discountText.match(/(\d+)\s*%\s*off/i);
+  if (discountMatch) {
+    return Number(discountMatch[1]);
+  }
+
+  if (priceValue > 0 && originalValue > priceValue) {
+    const diff = originalValue - priceValue;
+    return Math.round((diff / originalValue) * 100);
+  }
+
+  return null;
+}
+
+function extractPriceDetails(card) {
+  const priceContainer =
+    card.querySelector(".currency-value") ||
+    card.querySelector(".currency-symbol")?.parentElement ||
+    card.querySelector(".n-listing-card__price") ||
+    card.querySelector("[data-buy-box-listing-price]");
+
+  const priceText = priceContainer?.textContent || priceContainer?.getAttribute("data-buy-box-listing-price") || "";
+  const price = parsePrice(priceText);
+
+  const currencySymbol = card.querySelector(".currency-symbol")?.textContent?.trim() || "";
+
+  const originalPriceNode =
+    card.querySelector(".wt-text-strikethrough .currency-value") ||
+    card.querySelector(".wt-text-strikethrough") ||
+    card.querySelector(".search-collage-promotion-price");
+  const originalPriceText = originalPriceNode?.textContent || "";
+  const hasOriginal = Boolean(originalPriceText && originalPriceText.trim().length > 0);
+  const originalPrice = hasOriginal ? parsePrice(originalPriceText) : { value: null, currency: null };
+
+  const discountRegion = originalPriceNode?.parentElement || priceContainer;
+  const discountPercent = parseDiscount(discountRegion?.textContent || "", price.value, originalPrice.value || 0);
+  const isOnSale = Boolean(hasOriginal && originalPrice.value && price.value && originalPrice.value > price.value);
+
+  return {
+    price,
+    priceText,
+    currencySymbol,
+    originalPriceText,
+    originalPriceValue: hasOriginal ? originalPrice.value : null,
+    originalPriceCurrency: hasOriginal ? originalPrice.currency : null,
+    discountPercent,
+    isOnSale
+  };
+}
+
 function extractEtsyListings() {
   const now = new Date().toISOString();
   const cards = Array.from(
@@ -141,14 +239,7 @@ function extractEtsyListings() {
       link?.textContent ||
       "";
 
-    const priceContainer =
-      card.querySelector(".currency-value") ||
-      card.querySelector(".currency-symbol")?.parentElement ||
-      card.querySelector(".n-listing-card__price") ||
-      card.querySelector("[data-buy-box-listing-price]");
-
-    const priceText = priceContainer?.textContent || priceContainer?.getAttribute("data-buy-box-listing-price");
-    const price = parsePrice(priceText);
+    const priceDetails = extractPriceDetails(card);
 
     const { ratingValue, ratingCount } = parseRating(card);
 
@@ -165,6 +256,19 @@ function extractEtsyListings() {
       "";
 
     const imageUrls = extractImageUrls(card);
+    const imageAltTexts = extractImageAlts(card);
+    const thumbnailAlt = imageAltTexts[0] || link?.getAttribute("title") || title;
+
+    const badges = extractBadges(card);
+
+    const { query, appearsEventData } = parseAppearsEventData(card);
+
+    const position = Number(link?.getAttribute("data-index") || card.getAttribute("data-index"));
+    const loggingKey =
+      link?.getAttribute("data-logging-key") ||
+      card.getAttribute("data-logging-key") ||
+      card.querySelector("[data-logging-key]")?.getAttribute("data-logging-key") ||
+      "";
 
     if (!listingId && !link?.href) {
       return;
@@ -176,9 +280,18 @@ function extractEtsyListings() {
       captured_at: now,
       listing_id: listingId || (link?.href ? link.href : ""),
       title: title.trim(),
-      description: "",
-      price_value: price.value,
-      price_currency: typeof price.currency === "string" ? price.currency : "USD",
+      description: thumbnailAlt?.trim() || "",
+      price_value: priceDetails.price.value,
+      price_currency: typeof priceDetails.price.currency === "string" ? priceDetails.price.currency : "USD",
+      price_text: priceDetails.priceText.trim(),
+      currency_symbol: priceDetails.currencySymbol || "",
+      original_price_value: priceDetails.originalPriceValue,
+      original_price_currency: typeof priceDetails.originalPriceCurrency === "string"
+        ? priceDetails.originalPriceCurrency
+        : null,
+      original_price_text: priceDetails.originalPriceText.trim(),
+      discount_percent: priceDetails.discountPercent,
+      is_on_sale: priceDetails.isOnSale,
       rating_value: ratingValue,
       rating_count: ratingCount,
       favorites: 0,
@@ -188,7 +301,13 @@ function extractEtsyListings() {
         id: sellerId || "",
         name: sellerName.trim()
       },
-      image_urls: imageUrls
+      image_urls: imageUrls,
+      image_alt_texts: imageAltTexts,
+      badges,
+      search_query: query,
+      appears_event_data: appearsEventData,
+      position: Number.isFinite(position) ? position : null,
+      logging_key: loggingKey
     });
   });
 

@@ -483,15 +483,34 @@ async function handleExtractSchema(command) {
     }
 
     const listings = Array.isArray(response.data?.listings) ? response.data.listings : [];
-    const validatedListings = listings.filter((item) => {
+    const schemas = Array.isArray(response.data?.schemas) ? response.data.schemas : [];
+    const validatedListings = [];
+    const rejectedListings = [];
+
+    listings.forEach((item) => {
       const isValid = validateListingRecord(item);
       if (!isValid) {
+        rejectedListings.push(item);
         console.warn("Invalid listing record rejected", item);
+      } else {
+        validatedListings.push(item);
       }
-      return isValid;
     });
 
-    return { status: "completed", records: validatedListings };
+    const result = {
+      status: "completed",
+      records: validatedListings,
+      totalListingsFound: listings.length
+    };
+
+    if (schemas.length) {
+      result.rawSchemas = schemas;
+    }
+    if (rejectedListings.length) {
+      result.rejectedListings = rejectedListings;
+    }
+
+    return result;
   } catch (error) {
     console.error("Schema extraction failed", error);
     return { status: "failed", errorCode: error.message };
