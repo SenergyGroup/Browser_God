@@ -275,21 +275,46 @@ async function handleOpenUrl(command, settings) {
     settings
   });
 
-  if (Array.isArray(command.payload?.actions)) {
-    for (const action of command.payload.actions) {
-      const actionCommand = { id: `${command.id}:${action.type}`, type: action.type, payload: { ...action.payload, tabId } };
-      const actionResult = await executeCommand(actionCommand);
-      await storeResult(actionCommand, actionResult);
-      await logCommand(actionCommand, actionResult.status, actionResult.errorCode);
-      notifyResult(actionCommand, actionResult);
+  // IMPORTANT: accept actions from either payload.actions or command.actions
+  const actions =
+    Array.isArray(command.payload?.actions)
+      ? command.payload.actions
+      : Array.isArray(command.actions)
+        ? command.actions
+        : [];
+
+  // Collect records from nested actions (especially CAPTURE_JSON_FROM_DEVTOOLS)
+  const collectedRecords = [];
+
+  if (actions.length > 0) {
+    for (const [index, action] of actions.entries()) {
+      const actionCommand = {
+        id: `${command.id}:${index}:${action.type}`,
+        type: action.type,
+        payload: { ...action.payload, tabId }
+      };
+
+      // This will call executeCommand, then storeResult/log/notify/broadcast
+      const actionResult = await executeActionCommand(actionCommand);
+
+      if (Array.isArray(actionResult.records)) {
+        collectedRecords.push(...actionResult.records);
+      }
+
       if (actionResult.status !== "completed") {
         console.warn("Action failed", action, actionResult);
       }
     }
   }
 
+  if (collectedRecords.length > 0) {
+    return { status: "completed", tabId, records: collectedRecords };
+  }
+
   return { status: "completed", tabId };
 }
+
+
 
 async function waitForTabLoad(tabId) {
   return new Promise((resolve) => {
@@ -338,6 +363,15 @@ async function handleWait(command) {
   return { status: "completed" };
 }
 
+async function executeActionCommand(command) {
+  const actionResult = await executeCommand(command);
+  await storeResult(command, actionResult);
+  await logCommand(command, actionResult.status, actionResult.errorCode);
+  notifyResult(command, actionResult);
+  await broadcastExtensionState();
+  return actionResult;
+}
+
 async function handleDomAction(command, actionType) {
   const tabId = command?.payload?.tabId ?? command?.payload?.targetTabId;
   if (!tabId) {
@@ -361,43 +395,60 @@ async function handleCaptureJson(command, settings) {
   }
 
   const session = activeTabSessions.get(tabId);
-  session.captureMode = command.payload?.captureType || "listings";
-  session.capturedBodies = [];
+
+  // Set capture mode, but DO NOT wipe the bodies we already collected
+  const captureType =
+    command.payload?.captureType || session.captureMode || "listings";
+  session.captureMode = captureType;
+
+  // IMPORTANT: remove this line so we keep responses from navigation + scroll
+  // session.capturedBodies = [];
 
   const waitMs = command.payload?.waitForMs ?? 5000;
   await new Promise((resolve) => setTimeout(resolve, waitMs));
+
+  // Optional debug, can help sanity-check:
+  console.log(
+    "handleCaptureJson: capturedBodies length",
+    session.capturedBodies.length
+  );
 
   const parsedRecords = [];
   for (const body of session.capturedBodies) {
     if (body.raw.length > settings.maxResponseBodyBytes) {
       continue;
     }
+
     try {
       const json = JSON.parse(body.raw);
-      const transformed = applyTransformers(session, json, body.url);
-      for (const record of transformed) {
-        if (record.source === "etsy" && record.listing_id) {
-          if (validateListingRecord(record)) {
-            parsedRecords.push(record);
-          }
-        } else if (record.review_id && validateReviewRecord(record)) {
-          parsedRecords.push(record);
-        }
-      }
+
+      // TEMP: store raw captures instead of strict Etsy listing/review objects
+      parsedRecords.push({
+        source: "raw",
+        url: body.url,
+        captureType: session.captureMode || "listings",
+        json
+      });
     } catch (error) {
       console.warn("Failed to parse response", error);
     }
   }
 
-  await chrome.debugger.detach({ tabId }).catch((error) => console.warn("Failed to detach", error));
+
+  await chrome.debugger.detach({ tabId }).catch((error) =>
+    console.warn("Failed to detach", error)
+  );
   activeTabSessions.delete(tabId);
 
   if (command.payload?.closeTab !== false) {
-    await chrome.tabs.remove(tabId).catch((error) => console.warn("Failed to close tab", error));
+    await chrome.tabs.remove(tabId).catch((error) =>
+      console.warn("Failed to close tab", error)
+    );
   }
 
   return { status: "completed", records: parsedRecords };
 }
+
 
 function applyTransformers(session, json, url) {
   const results = [];
@@ -460,13 +511,26 @@ async function handleResponseReceived(tabId, params) {
     return;
   }
   try {
-    const { body, base64Encoded } = await chrome.debugger.sendCommand({ tabId }, "Network.getResponseBody", { requestId });
+    const { body, base64Encoded } = await chrome.debugger.sendCommand(
+      { tabId },
+      "Network.getResponseBody",
+      { requestId }
+    );
     const raw = base64Encoded ? atob(body) : body;
     session.capturedBodies.push({ url, raw });
+
+    // DEBUG: how many JSON responses have we collected so far?
+    console.log(
+      "handleResponseReceived capturedBodies length",
+      tabId,
+      session.capturedBodies.length,
+      url
+    );
   } catch (error) {
     console.warn("Failed to read response body", error);
   }
 }
+
 
 function isUrlRelevant(url) {
   return /etsy\.com/.test(url);
