@@ -478,10 +478,20 @@ async function handleExtractSchema(command) {
   }
   try {
     const response = await chrome.tabs.sendMessage(tabId, { type: "EXTRACT_SCHEMA", payload: command.payload });
-    if (response?.ok) {
-      return { status: "completed", data: response.data };
+    if (!response?.ok) {
+      return { status: "failed", errorCode: response?.error || "EXTRACTION_FAILED" };
     }
-    return { status: "failed", errorCode: response?.error || "EXTRACTION_FAILED" };
+
+    const listings = Array.isArray(response.data?.listings) ? response.data.listings : [];
+    const validatedListings = listings.filter((item) => {
+      const isValid = validateListingRecord(item);
+      if (!isValid) {
+        console.warn("Invalid listing record rejected", item);
+      }
+      return isValid;
+    });
+
+    return { status: "completed", records: validatedListings };
   } catch (error) {
     console.error("Schema extraction failed", error);
     return { status: "failed", errorCode: error.message };
