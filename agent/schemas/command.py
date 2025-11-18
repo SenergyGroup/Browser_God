@@ -16,6 +16,7 @@ class CommandType(str, Enum):
     CLICK = "CLICK"
     CAPTURE_JSON_FROM_DEVTOOLS = "CAPTURE_JSON_FROM_DEVTOOLS"
     EXTRACT_SCHEMA = "EXTRACT_SCHEMA"
+    EXECUTE_SEARCH_TASK = "EXECUTE_SEARCH_TASK"
 
 
 class CommandAction(BaseModel):
@@ -74,6 +75,12 @@ class Command(BaseModel):
             close_tab = payload.get("closeTab")
             if close_tab is not None and not isinstance(close_tab, bool):
                 raise ValueError("CAPTURE_JSON_FROM_DEVTOOLS 'closeTab' must be a boolean")
+        elif command_type == CommandType.EXECUTE_SEARCH_TASK:
+            search_terms = payload.get("searchTerms")
+            if not isinstance(search_terms, list) or not all(
+                isinstance(term, str) and term.strip() for term in search_terms
+            ):
+                raise ValueError("EXECUTE_SEARCH_TASK payload requires a non-empty 'searchTerms' array")
         elif command_type in {CommandType.SCROLL_TO_BOTTOM, CommandType.CLICK, CommandType.EXTRACT_SCHEMA}:
             # For now we accept arbitrary payloads documented elsewhere.
             if not isinstance(payload, dict):

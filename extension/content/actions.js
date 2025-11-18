@@ -330,5 +330,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse(extractSchemas(message.payload || {}));
     return false;
   }
+  if (message.type === "GET_ACTIVE_PAGE") {
+    sendResponse({ ok: true, data: { activePage: detectActivePageNumber() } });
+    return false;
+  }
   return false;
 });
+
+function detectActivePageNumber() {
+  const activeButton =
+    document.querySelector('[aria-current="page"], [aria-current="true"], nav[aria-label*="Pagination" i] [aria-current]') ||
+    document.querySelector("[data-page][aria-current]");
+
+  const pageText = activeButton?.textContent?.trim() || activeButton?.getAttribute("data-page") || "";
+  const pageNumber = Number.parseInt(pageText, 10);
+  if (Number.isFinite(pageNumber)) {
+    return pageNumber;
+  }
+
+  const fallback = document.querySelector(".wt-action-group__item button[aria-current]");
+  const fallbackText = fallback?.textContent?.trim() || "";
+  const fallbackNumber = Number.parseInt(fallbackText, 10);
+  return Number.isFinite(fallbackNumber) ? fallbackNumber : null;
+}
