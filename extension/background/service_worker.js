@@ -279,6 +279,9 @@ async function handleOpenUrl(command, settings) {
     for (const action of command.payload.actions) {
       const actionCommand = { id: `${command.id}:${action.type}`, type: action.type, payload: { ...action.payload, tabId } };
       const actionResult = await executeCommand(actionCommand);
+      await storeResult(actionCommand, actionResult);
+      await logCommand(actionCommand, actionResult.status, actionResult.errorCode);
+      notifyResult(actionCommand, actionResult);
       if (actionResult.status !== "completed") {
         console.warn("Action failed", action, actionResult);
       }
