@@ -4,6 +4,7 @@ from __future__ import annotations
 import uuid
 from enum import Enum
 from typing import Any, Dict, List, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -85,7 +86,7 @@ class Command(BaseModel):
 class EnqueueCommandRequest(BaseModel):
     """Envelope for enqueueCommand messages."""
 
-    type: str = Field("enqueueCommand", const=True)
+    type: Literal["enqueueCommand"] = Field("enqueueCommand")
     command: Command
 
 
