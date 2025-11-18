@@ -46,8 +46,16 @@ class ExtensionBridge:
                 if not future.done():
                     future.set_exception(ConnectionError("Extension disconnected"))
             self._pending_requests.clear()
+            LOGGER.info("[Agent Bridge] Extension connection terminated.")
 
     async def _handle_extension_message(self, message: Dict[str, Any]) -> None:
+        LOGGER.info(
+            "[Agent Bridge] Received message from extension",
+            extra={
+                "envelope": message.get("envelope") or message.get("type"),
+                "requestId": message.get("requestId"),
+            },
+        )
         envelope = message.get("envelope")
         if envelope == "extension-response":
             request_id = message.get("requestId")
@@ -95,7 +103,14 @@ class ExtensionBridge:
                 "payload": payload,
             }
             await self._extension_socket.send_text(json.dumps(envelope))
-        LOGGER.debug("Message sent to extension", extra={"requestId": request_id, "payload": payload})
+        LOGGER.info(
+            "[Agent Bridge] Sending message to extension",
+            extra={
+                "requestId": request_id,
+                "payload": payload,
+                "type": payload.get("type"),
+            },
+        )
         response = await asyncio.wait_for(future, timeout=10)
         if not isinstance(response, dict):
             raise ValueError("Extension response must be a JSON object")

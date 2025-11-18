@@ -206,9 +206,11 @@ async function processQueue() {
     return;
   }
   processing = true;
+  console.log(`[Queue] Starting to process ${commandQueue.length} commands.`);
   await broadcastExtensionState();
   while (commandQueue.length) {
     const command = commandQueue.shift();
+    console.log(`[Queue] Dequeued command: ${command.type} (${command.id})`);
     const result = await executeCommand(command);
     await storeResult(command, result);
     await logCommand(command, result.status, result.errorCode);
@@ -216,12 +218,14 @@ async function processQueue() {
     await broadcastExtensionState();
   }
   processing = false;
+  console.log("[Queue] Finished processing. Queue is now empty.");
   await broadcastExtensionState();
 }
 
 async function executeCommand(command) {
   const settings = await getSettings();
   try {
+    console.log(`[Executor] Executing command: ${command.type} (${command.id})`);
     switch (command.type) {
       case COMMAND_TYPES.OPEN_URL:
         return await handleOpenUrl(command, settings);
@@ -328,11 +332,23 @@ async function handleExecuteSearchTask(command, settings) {
 
   const maxPagesPerTerm = 50;
 
-  for (const term of searchTerms) {
+  console.log(
+    `[Search Task ${command.id}] Starting task with ${searchTerms.length} terms.`
+  );
+
+  for (const [index, term] of searchTerms.entries()) {
     let currentPage = 1;
     let keepGoing = true;
+    let terminationReason = "";
+
+    console.log(
+      `[Search Task ${command.id}] Starting term ${index + 1}/${searchTerms.length}: "${term}"`
+    );
 
     while (keepGoing && currentPage <= maxPagesPerTerm) {
+      console.log(
+        `[Search Task ${command.id}]  - Attempting to scrape page ${currentPage} for "${term}"`
+      );
       const randomDelay = Math.floor(Math.random() * (3000 - 1500 + 1)) + 1500;
       const actions = (SEARCH_TASK_TEMPLATE.actionsPerPage || []).map((action) => {
         const payload = { ...(action.payload || {}) };
@@ -359,21 +375,37 @@ async function handleExecuteSearchTask(command, settings) {
       const tabId = result?.tabId;
 
       const detectedPage = tabId ? await detectActivePageNumber(tabId) : null;
+      console.log(
+        `[Search Task ${command.id}]  - Detected active page on tab ${tabId}: ${detectedPage}`
+      );
       await cleanupTab(tabId);
 
       if (result?.status !== "completed") {
         keepGoing = false;
+        terminationReason = `[Search Task ${command.id}]  - A sub-command failed. Concluding search for "${term}".`;
         break;
       }
 
       if (detectedPage && detectedPage < currentPage) {
         keepGoing = false;
+        terminationReason = `[Search Task ${command.id}]  - Detected page reset (${detectedPage} < ${currentPage}). Concluding search for "${term}".`;
       } else {
         currentPage += 1;
       }
     }
+
+    if (!terminationReason && currentPage > maxPagesPerTerm) {
+      terminationReason = `[Search Task ${command.id}]  - Reached max page limit (${maxPagesPerTerm}). Concluding search for "${term}".`;
+    }
+
+    if (terminationReason) {
+      console.log(terminationReason);
+    }
   }
 
+  console.log(
+    `[Search Task ${command.id}] All terms processed. Initiating final data export.`
+  );
   await exportCapturedData();
   return { status: "completed" };
 }

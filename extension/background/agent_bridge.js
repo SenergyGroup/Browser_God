@@ -51,6 +51,7 @@ export class AgentBridge {
       this.onStatusChange("connecting");
 
       this.socket.onopen = async () => {
+        console.log("[Agent Bridge] WebSocket connection established.");
         this.reconnectAttempts = 0;
         this.onStatusChange("connected");
         await this.sendExtensionState();
@@ -67,6 +68,7 @@ export class AgentBridge {
       };
 
       this.socket.onclose = () => {
+        console.log("[Agent Bridge] WebSocket connection closed.");
         this.onStatusChange("disconnected");
         if (this.shouldRun) {
           this.scheduleReconnect();
@@ -74,6 +76,7 @@ export class AgentBridge {
       };
 
       this.socket.onerror = (error) => {
+        console.error("[Agent Bridge] WebSocket error occurred.");
         console.error("Agent bridge websocket error", error);
         this.socket?.close();
       };
@@ -117,10 +120,14 @@ export class AgentBridge {
   scheduleReconnect() {
     this.reconnectAttempts += 1;
     const delay = calculateBackoff(this.reconnectAttempts);
+    console.log(
+      `[Agent Bridge] Scheduling reconnect attempt ${this.reconnectAttempts} in ${delay}ms.`
+    );
     setTimeout(() => this.connect(), delay);
   }
 
   async handleIncomingMessage(message) {
+    console.log("[Agent Bridge] Received message from agent:", message);
     if (message?.envelope === "agent-message") {
       const { requestId, payload } = message;
       const response = await this.safeHandleRequest(payload);
