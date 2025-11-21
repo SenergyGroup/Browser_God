@@ -59,9 +59,14 @@ The console immediately attaches to the `/events` stream so you can watch bridge
 Examples:
 
 ```bash
-run WAIT {"milliseconds": 1000}
-run OPEN_URL {"url": "https://www.etsy.com/search?q=lamp", "actions": [{"type": "WAIT", "payload": {"milliseconds": 1500}}, {"type": "SCROLL_TO_BOTTOM", "payload": {"tabId": 123}}]}
-run CAPTURE_JSON_FROM_DEVTOOLS {"tabId": 123, "waitForMs": 2000, "closeTab": false}
+run OPEN_URL {
+  "url": "https://www.etsy.com/search?q=lamp",
+  "actions": [
+    { "type": "WAIT", "payload": { "milliseconds": 2000 } },
+    { "type": "SCROLL_TO_BOTTOM", "payload": {} },
+    { "type": "EXTRACT_SCHEMA", "payload": {} }
+  ]
+}
 ```
 
 ## Observing Events & Diagnostics

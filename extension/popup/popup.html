@@ -6,29 +6,56 @@
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
+    <!-- WebGL Canvas Layer -->
+    <canvas id="blackhole"></canvas>
+
     <main>
       <header>
-        <h1>Data Gatherer</h1>
-        <label class="toggle">
-          <input type="checkbox" id="agent-toggle" />
-          <span>Agent control</span>
-        </label>
+        <div class="brand">
+          <h1 style="font-size: 20px; letter-spacing: 2px;">Browser God <span class="subtitle"></h1>
+        </div>
+        <button id="open-settings" class="icon-btn" title="System Config">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        </button>
       </header>
-      <section id="status">
-        <div><strong>Queue:</strong> <span id="queue-length">0</span></div>
-        <div><strong>Processing:</strong> <span id="processing">no</span></div>
+
+      <div class="glass-panel control-panel">
+        <label class="toggle-wrapper">
+          <span class="label-text">AUTONOMOUS AGENT</span>
+          <div class="toggle">
+            <input type="checkbox" id="agent-toggle" />
+            <span class="slider"></span>
+          </div>
+        </label>
+      </div>
+
+      <div class="grid-stats">
+        <div class="glass-panel stat-box">
+          <span class="stat-label">Queue</span>
+          <span class="stat-value" id="queue-length">0</span>
+        </div>
+        <div class="glass-panel stat-box">
+          <span class="stat-label">Status</span>
+          <span class="stat-value" id="processing">VOID</span>
+        </div>
+      </div>
+
+      <section class="logs-section">
+        <h2>LOGS</h2>
+        <div class="logs-container glass-panel">
+          <ul id="logs"></ul>
+        </div>
       </section>
-      <section>
-        <h2>Recent activity</h2>
-        <ul id="logs"></ul>
+
+      <section class="actions-section">
+        <button id="trigger-test-command" class="btn secondary">
+          INITIATE PROBE
+        </button>
       </section>
-      <section id="internal-tools">
-        <h2>Internal tools</h2>
-        <button id="trigger-test-command" class="secondary">Run test command</button>
-      </section>
+
       <footer>
-        <button id="export">Export NDJSON</button>
-        <button id="clear-storage">Clear data</button>
+        <button id="export" class="btn primary">EXTRACT</button>
+        <button id="clear-storage" class="btn danger">COLLAPSE</button>
       </footer>
     </main>
     <script type="module" src="popup.js"></script>
