@@ -1,6 +1,6 @@
 import { validateListingRecord, validateReviewRecord } from "../common/schemas.js";
 import { transformEtsyListing, transformEtsyReviews } from "../common/transformers.js";
-import { DEFAULT_SETTINGS } from "./settings.js";
+import { DEFAULT_SETTINGS, SEARCH_TASK_TEMPLATE } from "./settings.js";
 import { AgentBridge } from "./agent_bridge.js";
 
 const COMMAND_TYPES = {
@@ -9,7 +9,8 @@ const COMMAND_TYPES = {
   SCROLL_TO_BOTTOM: "SCROLL_TO_BOTTOM",
   CLICK: "CLICK",
   CAPTURE_JSON_FROM_DEVTOOLS: "CAPTURE_JSON_FROM_DEVTOOLS",
-  EXTRACT_SCHEMA: "EXTRACT_SCHEMA"
+  EXTRACT_SCHEMA: "EXTRACT_SCHEMA",
+  EXECUTE_SEARCH_TASK: "EXECUTE_SEARCH_TASK"
 };
 
 const ERROR_CODES = {
@@ -205,9 +206,11 @@ async function processQueue() {
     return;
   }
   processing = true;
+  console.log(`[Queue] Starting to process ${commandQueue.length} commands.`);
   await broadcastExtensionState();
   while (commandQueue.length) {
     const command = commandQueue.shift();
+    console.log(`[Queue] Dequeued command: ${command.type} (${command.id})`);
     const result = await executeCommand(command);
     await storeResult(command, result);
     await logCommand(command, result.status, result.errorCode);
@@ -215,12 +218,14 @@ async function processQueue() {
     await broadcastExtensionState();
   }
   processing = false;
+  console.log("[Queue] Finished processing. Queue is now empty.");
   await broadcastExtensionState();
 }
 
 async function executeCommand(command) {
   const settings = await getSettings();
   try {
+    console.log(`[Executor] Executing command: ${command.type} (${command.id})`);
     switch (command.type) {
       case COMMAND_TYPES.OPEN_URL:
         return await handleOpenUrl(command, settings);
@@ -234,6 +239,8 @@ async function executeCommand(command) {
         return await handleCaptureJson(command, settings);
       case COMMAND_TYPES.EXTRACT_SCHEMA:
         return await handleExtractSchema(command);
+      case COMMAND_TYPES.EXECUTE_SEARCH_TASK:
+        return await handleExecuteSearchTask(command, settings);
       default:
         return { status: "failed", errorCode: ERROR_CODES.INVALID_COMMAND };
     }
@@ -314,6 +321,95 @@ async function handleOpenUrl(command, settings) {
   return { status: "completed", tabId };
 }
 
+async function handleExecuteSearchTask(command, settings) {
+  const searchTerms = Array.isArray(command?.payload?.searchTerms)
+    ? command.payload.searchTerms.filter((term) => typeof term === "string" && term.trim().length > 0)
+    : [];
+
+  if (!searchTerms.length) {
+    return { status: "failed", errorCode: ERROR_CODES.INVALID_COMMAND };
+  }
+
+  const maxPagesPerTerm = 50;
+
+  console.log(
+    `[Search Task ${command.id}] Starting task with ${searchTerms.length} terms.`
+  );
+
+  for (const [index, term] of searchTerms.entries()) {
+    let currentPage = 1;
+    let keepGoing = true;
+    let terminationReason = "";
+
+    console.log(
+      `[Search Task ${command.id}] Starting term ${index + 1}/${searchTerms.length}: "${term}"`
+    );
+
+    while (keepGoing && currentPage <= maxPagesPerTerm) {
+      console.log(
+        `[Search Task ${command.id}]  - Attempting to scrape page ${currentPage} for "${term}"`
+      );
+      const randomDelay = Math.floor(Math.random() * (3000 - 1500 + 1)) + 1500;
+      const actions = (SEARCH_TASK_TEMPLATE.actionsPerPage || []).map((action) => {
+        const payload = { ...(action.payload || {}) };
+        if (action.type === COMMAND_TYPES.WAIT) {
+          payload.milliseconds = randomDelay;
+        }
+        return { type: action.type, payload };
+      });
+
+      const url = SEARCH_TASK_TEMPLATE.urlTemplate
+        .replace("{searchTerm}", encodeURIComponent(term))
+        .replace("{pageNumber}", currentPage);
+
+      const pageCommand = {
+        id: `${command.id}:${term}:${currentPage}`,
+        type: COMMAND_TYPES.OPEN_URL,
+        payload: {
+          url,
+          actions
+        }
+      };
+
+      const result = await executeActionCommand(pageCommand);
+      const tabId = result?.tabId;
+
+      const detectedPage = tabId ? await detectActivePageNumber(tabId) : null;
+      console.log(
+        `[Search Task ${command.id}]  - Detected active page on tab ${tabId}: ${detectedPage}`
+      );
+      await cleanupTab(tabId);
+
+      if (result?.status !== "completed") {
+        keepGoing = false;
+        terminationReason = `[Search Task ${command.id}]  - A sub-command failed. Concluding search for "${term}".`;
+        break;
+      }
+
+      if (detectedPage && detectedPage < currentPage) {
+        keepGoing = false;
+        terminationReason = `[Search Task ${command.id}]  - Detected page reset (${detectedPage} < ${currentPage}). Concluding search for "${term}".`;
+      } else {
+        currentPage += 1;
+      }
+    }
+
+    if (!terminationReason && currentPage > maxPagesPerTerm) {
+      terminationReason = `[Search Task ${command.id}]  - Reached max page limit (${maxPagesPerTerm}). Concluding search for "${term}".`;
+    }
+
+    if (terminationReason) {
+      console.log(terminationReason);
+    }
+  }
+
+  console.log(
+    `[Search Task ${command.id}] All terms processed. Initiating final data export.`
+  );
+  await exportCapturedData();
+  return { status: "completed" };
+}
+
 
 
 async function waitForTabLoad(tabId) {
@@ -361,6 +457,33 @@ async function handleWait(command) {
   const ms = command?.payload?.milliseconds ?? 1000;
   await new Promise((resolve) => setTimeout(resolve, ms));
   return { status: "completed" };
+}
+
+async function detectActivePageNumber(tabId) {
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, { type: "GET_ACTIVE_PAGE" });
+    if (response?.ok && typeof response.data?.activePage === "number") {
+      return response.data.activePage;
+    }
+  } catch (error) {
+    console.warn("Failed to detect active page", error);
+  }
+  return null;
+}
+
+async function cleanupTab(tabId) {
+  if (!tabId) {
+    return;
+  }
+  if (activeTabSessions.has(tabId)) {
+    await chrome.debugger.detach({ tabId }).catch((error) =>
+      console.warn("Failed to detach debugger", error)
+    );
+    activeTabSessions.delete(tabId);
+  }
+  await chrome.tabs.remove(tabId).catch((error) =>
+    console.warn("Failed to close tab", error)
+  );
 }
 
 async function executeActionCommand(command) {
