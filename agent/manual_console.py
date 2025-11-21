@@ -12,6 +12,7 @@ import httpx
 import websockets
 
 from .schemas.command import CommandType
+from dotenv import load_dotenv
 
 LOGGER = logging.getLogger(__name__)
 
@@ -160,43 +161,79 @@ class ManualConsole:
             print("Missing OPENAI_API_KEY environment variable")
             return []
 
-        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini") # or gpt-5-nano
+        
         system_prompt = (
-            "You generate concise Etsy search queries. Return ONLY a JSON array of 5-10 short, "
-            "diverse search terms relevant to the provided topic."
+            "You are an expert e-commerce marketing assistant specializing in Etsy. "
+            "Your task is to generate search queries that a real user would type. "
+            "Return a JSON object with a single key 'search_terms' which is an array of 5-10 concise and diverse search terms. "
+            "Focus on including a mix of product types, long-tail keywords, and user intents (e.g., gifts, custom orders)."
+            "\n\n"
+            "Example for the topic 'vintage cameras':\n"
+            "{\n"
+            '  "search_terms": [\n'
+            '    "retro polaroid camera",\n'
+            '    "working 8mm film camera",\n'
+            '    "35mm point and shoot camera",\n'
+            '    "vintage kodak brownie camera",\n'
+            '    "camera collector gift",\n'
+            '    "antique folding camera"\n'
+            '  ]\n'
+            "}"
         )
-        user_prompt = f"Topic: {topic}\nReturn only the JSON array."
+        user_prompt = f"Topic: {topic}"
 
         try:
+            # Print payload for debugging
+            request_payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "response_format": {"type": "json_object"},
+                "temperature": 1,
+                "max_completion_tokens": 2048
+            }
+            print(f"Sending the following payload to OpenAI:\n{json.dumps(request_payload, indent=2)}")
+
             async with httpx.AsyncClient(timeout=45) as client:
                 response = await client.post(
                     "https://api.openai.com/v1/chat/completions",
                     headers={"Authorization": f"Bearer {api_key}"},
-                    json={
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt}
-                        ],
-                        "temperature": 0.7,
-                        "max_tokens": 256
-                    }
+                    json=request_payload
                 )
                 response.raise_for_status()
-                content = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-        except Exception as error:  # noqa: BLE001
+                
+                # Log full response
+                full_response_json = response.json()
+                print("\n--- Full OpenAI API Response ---")
+                print(json.dumps(full_response_json, indent=2))
+                print("--- End of Full Response ---\n")
+                
+                content = full_response_json.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+        except Exception as error:
             print(f"LLM request failed: {error}")
             return []
 
+        # --- PARSING LOGIC FIX ---
         try:
-            parsed = json.loads(content)
+            data = json.loads(content)
+            
+            # OpenAI 'json_object' mode returns a dict: {"search_terms": [...]}
+            if isinstance(data, dict):
+                parsed = data.get("search_terms", [])
+            # Fallback in case a model returns a raw list
+            elif isinstance(data, list):
+                parsed = data
+            else:
+                parsed = []
+                
         except json.JSONDecodeError:
-            try:
-                cleaned = content[content.index("[") : content.rindex("]") + 1]
-                parsed = json.loads(cleaned)
-            except Exception:  # noqa: BLE001
-                print("LLM response was not valid JSON")
-                return []
+            print("LLM response was not valid JSON")
+            return []
+        # -------------------------
 
         search_terms = [term.strip() for term in parsed if isinstance(term, str) and term.strip()]
         return search_terms[:10]
