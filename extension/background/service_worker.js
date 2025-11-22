@@ -390,7 +390,7 @@ async function handleExecuteSearchTask(command, settings) {
       `[Search Task ${command.id}] Starting term ${index + 1}/${searchTerms.length}: "${term}"`
     );
 
-    while (keepGoing && currentPage <= maxPagesPerTerm && !emergencyStopActive) {
+    while (keepGoing && currentPage <= maxPagesPerTerm) {
       let tabId;
       let result = null;
       console.log(
