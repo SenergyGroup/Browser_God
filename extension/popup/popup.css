@@ -174,6 +174,12 @@ input:checked + .slider:before {
 #logs { list-style: none; padding: 0; margin: 0; }
 #logs li { padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
 
+.actions-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 /* Buttons */
 footer { display: flex; gap: 10px; margin-top: 20px; }
 .btn {
@@ -196,6 +202,18 @@ footer { display: flex; gap: 10px; margin-top: 20px; }
 
 .btn.danger { border-color: var(--danger); color: var(--danger); }
 .btn.danger:hover { background: var(--danger); color: #fff; box-shadow: 0 0 15px var(--danger); }
+
+#emergency-stop {
+  border-width: 2px;
+  background: rgba(255, 68, 68, 0.15);
+  color: #fff;
+  box-shadow: 0 0 18px rgba(255, 68, 68, 0.35);
+}
+
+#emergency-stop:hover {
+  background: var(--danger);
+  color: #fff;
+}
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }

@@ -32,6 +32,7 @@ const recentCommandTimestamps = [];
 let bridgeStatus = "disconnected";
 let agentBridge;
 const dataStreamer = new DataStreamer();
+let emergencyStopActive = false;
 
 chrome.runtime.onInstalled.addListener(async () => {
   await chrome.storage.local.set({
@@ -76,6 +77,10 @@ async function handleIncomingCommand(command) {
     throw new Error("Command must include id and type");
   }
 
+  if (emergencyStopActive) {
+    throw new Error("EMERGENCY_STOP");
+  }
+
   const settings = await getSettings();
   if (!settings.agentControlEnabled) {
     throw new Error("Agent control is disabled");
@@ -113,11 +118,43 @@ async function handleControlMessage(message) {
         return { ok: false, error: error.message };
       }
     }
+    case "emergencyShutdown": {
+      return await handleEmergencyShutdown();
+    }
     default: {
       console.warn("Unknown message type", message?.type);
       return { ok: false, error: "UNKNOWN_MESSAGE_TYPE" };
     }
   }
+}
+
+async function handleEmergencyShutdown() {
+  emergencyStopActive = true;
+  commandQueue.length = 0;
+  recentCommandTimestamps.length = 0;
+
+  const closedTabs = await closeActiveTabSessions();
+
+  const settings = await getSettings();
+  if (settings.agentControlEnabled) {
+    await chrome.storage.local.set({ settings: { ...settings, agentControlEnabled: false } });
+  }
+
+  if (agentBridge) {
+    agentBridge.stop();
+    bridgeStatus = "disconnected";
+  }
+  dataStreamer.stop();
+  processing = false;
+
+  await broadcastExtensionState();
+
+  return {
+    ok: true,
+    status: "shutdown",
+    closedTabs,
+    queueCleared: true
+  };
 }
 
 async function getSettings() {
@@ -133,7 +170,8 @@ async function getExtensionState() {
     queueLength: commandQueue.length,
     processing,
     logs: logs.slice(-20),
-    bridgeStatus
+    bridgeStatus,
+    emergencyStopActive
   };
 }
 
@@ -154,6 +192,13 @@ async function toggleAgentControl(enabled) {
   const settings = await getSettings();
   const next = { ...settings, agentControlEnabled: Boolean(enabled) };
   await chrome.storage.local.set({ settings: next });
+  if (enabled && emergencyStopActive) {
+    emergencyStopActive = false;
+    dataStreamer.start();
+    if (agentBridge) {
+      agentBridge.start();
+    }
+  }
   await broadcastExtensionState();
   return { ok: true, settings: next };
 }
@@ -196,13 +241,13 @@ function matchesOrigin(url, originPattern) {
 }
 
 async function processQueue() {
-  if (processing) {
+  if (processing || emergencyStopActive) {
     return;
   }
   processing = true;
   console.log(`[Queue] Starting to process ${commandQueue.length} commands.`);
   await broadcastExtensionState();
-  while (commandQueue.length) {
+  while (commandQueue.length && !emergencyStopActive) {
     const command = commandQueue.shift();
     console.log(`[Queue] Dequeued command: ${command.type} (${command.id})`);
     const result = await executeCommand(command);
@@ -217,6 +262,10 @@ async function processQueue() {
 }
 
 async function executeCommand(command) {
+  if (emergencyStopActive) {
+    return { status: "failed", errorCode: "EMERGENCY_STOP" };
+  }
+
   const settings = await getSettings();
   try {
     console.log(`[Executor] Executing command: ${command.type} (${command.id})`);
@@ -328,6 +377,10 @@ async function handleExecuteSearchTask(command, settings) {
   );
 
   for (const [index, term] of searchTerms.entries()) {
+    if (emergencyStopActive) {
+      break;
+    }
+
     let currentPage = 1;
     let keepGoing = true;
     let terminationReason = "";
@@ -395,6 +448,10 @@ async function handleExecuteSearchTask(command, settings) {
       }
     }
 
+    if (emergencyStopActive) {
+      terminationReason = terminationReason || `[Search Task ${command.id}]  - Emergency stop requested. Halting search for "${term}".`;
+    }
+
     if (!terminationReason && currentPage > maxPagesPerTerm) {
       terminationReason = `[Search Task ${command.id}]  - Reached max page limit (${maxPagesPerTerm}). Concluding search for "${term}".`;
     }
@@ -402,6 +459,11 @@ async function handleExecuteSearchTask(command, settings) {
     if (terminationReason) {
       console.log(terminationReason);
     }
+  }
+
+  if (emergencyStopActive) {
+    console.log(`[Search Task ${command.id}] Emergency stop activated. Task aborted.`);
+    return { status: "failed", errorCode: "EMERGENCY_STOP" };
   }
 
   console.log(
@@ -474,6 +536,9 @@ async function detectActivePageNumber(tabId) {
 
 async function waitForTabSlot(maxConcurrentTabs) {
   while (activeTabSessions.size >= maxConcurrentTabs) {
+    if (emergencyStopActive) {
+      throw new Error("EMERGENCY_STOP");
+    }
     await new Promise((resolve) => setTimeout(resolve, TAB_SLOT_POLL_INTERVAL_MS));
   }
 }
@@ -491,6 +556,16 @@ async function cleanupTab(tabId) {
   await chrome.tabs.remove(tabId).catch((error) =>
     console.warn("Failed to close tab", error)
   );
+}
+
+async function closeActiveTabSessions() {
+  let closed = 0;
+  const tabIds = Array.from(activeTabSessions.keys());
+  for (const tabId of tabIds) {
+    await cleanupTab(tabId);
+    closed += 1;
+  }
+  return closed;
 }
 
 async function executeActionCommand(command) {
