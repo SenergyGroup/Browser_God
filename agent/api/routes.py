@@ -1,7 +1,10 @@
 """HTTP and WebSocket routes exposed by the FastAPI application."""
 from __future__ import annotations
 
+import json
 import logging
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
@@ -75,6 +78,40 @@ async def extension_socket(
     bridge: ExtensionBridge = Depends(get_bridge),
 ) -> None:
     await bridge.register_extension(websocket)
+
+
+@router.websocket("/ws/data")
+async def data_stream(websocket: WebSocket) -> None:
+    """Stream scraped records to a JSONL file for each session."""
+
+    await websocket.accept()
+
+    data_dir = Path("data_streams")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    file_path = data_dir / f"scrape_session_{timestamp}.jsonl"
+
+    LOGGER.info("Data stream opened: %s", file_path)
+    file_handle = file_path.open("a", encoding="utf-8")
+
+    try:
+        while True:
+            message = await websocket.receive_text()
+            try:
+                payload = json.loads(message)
+            except json.JSONDecodeError:
+                payload = message
+
+            serialized = json.dumps(payload, ensure_ascii=False)
+            file_handle.write(f"{serialized}\n")
+            file_handle.flush()
+    except WebSocketDisconnect:
+        LOGGER.info("Data stream disconnected: %s", file_path)
+    except Exception:  # noqa: BLE001
+        LOGGER.exception("Data stream error")
+    finally:
+        file_handle.close()
+        await websocket.close()
 
 
 @router.websocket("/events")
