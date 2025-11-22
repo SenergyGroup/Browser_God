@@ -7,12 +7,16 @@ renderer.init();
 
 async function refreshState() {
   const state = await chrome.runtime.sendMessage({ type: "getExtensionState" });
-  
+
   document.getElementById("agent-toggle").checked = state.settings.agentControlEnabled;
   document.getElementById("queue-length").textContent = state.queueLength;
-  
+
   const procEl = document.getElementById("processing");
-  if (state.processing) {
+  if (state.emergencyStopActive) {
+    procEl.textContent = "SHUTDOWN";
+    procEl.style.color = "#ff4444";
+    procEl.style.textShadow = "0 0 8px #ff4444";
+  } else if (state.processing) {
     procEl.textContent = "CONSUMING";
     procEl.style.color = "#ff8c00"; // Orange
     procEl.style.textShadow = "0 0 8px #ff8c00";
@@ -91,6 +95,27 @@ document.getElementById("export").addEventListener("click", async () => {
 document.getElementById("clear-storage").addEventListener("click", async () => {
   await chrome.storage.local.set({ results: {}, logs: [] });
   refreshState();
+});
+
+document.getElementById("emergency-stop").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const originalText = button.innerText;
+  button.disabled = true;
+  button.innerText = "SHUTTING DOWN...";
+  button.style.borderColor = "#ff4444";
+
+  try {
+    await chrome.runtime.sendMessage({ type: "emergencyShutdown" });
+  } catch (error) {
+    console.error("Emergency shutdown failed", error);
+  } finally {
+    setTimeout(() => {
+      button.disabled = false;
+      button.innerText = originalText;
+      button.style.borderColor = "";
+      refreshState();
+    }, 800);
+  }
 });
 
 document.getElementById("trigger-test-command").addEventListener("click", async (event) => {

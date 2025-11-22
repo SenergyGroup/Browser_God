@@ -7,6 +7,8 @@ export const DEFAULT_SETTINGS = {
   agentWebSocketUrl: "ws://localhost:8000/ws/extension"
 };
 
+export const MAX_PAGES_PER_TERM = 50;
+
 export const SEARCH_TASK_TEMPLATE = {
   urlTemplate: "https://www.etsy.com/search?q={searchTerm}&ref=pagination&page={pageNumber}",
   actionsPerPage: [

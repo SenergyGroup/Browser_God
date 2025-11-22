@@ -1,7 +1,8 @@
 import { validateListingRecord, validateReviewRecord } from "../common/schemas.js";
 import { transformEtsyListing, transformEtsyReviews } from "../common/transformers.js";
-import { DEFAULT_SETTINGS, SEARCH_TASK_TEMPLATE } from "./settings.js";
+import { DEFAULT_SETTINGS, MAX_PAGES_PER_TERM, SEARCH_TASK_TEMPLATE } from "./settings.js";
 import { AgentBridge } from "./agent_bridge.js";
+import { DataStreamer } from "./data_streamer.js";
 
 const COMMAND_TYPES = {
   OPEN_URL: "OPEN_URL",
@@ -21,6 +22,8 @@ const ERROR_CODES = {
   RATE_LIMITED: "RATE_LIMITED"
 };
 
+const TAB_SLOT_POLL_INTERVAL_MS = 500;
+
 const commandQueue = [];
 let processing = false;
 const commandLogs = [];
@@ -28,16 +31,8 @@ const activeTabSessions = new Map();
 const recentCommandTimestamps = [];
 let bridgeStatus = "disconnected";
 let agentBridge;
-
-function encodeBase64(text) {
-  const encoder = new TextEncoder();
-  const bytes = encoder.encode(text);
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
-}
+const dataStreamer = new DataStreamer();
+let emergencyStopActive = false;
 
 chrome.runtime.onInstalled.addListener(async () => {
   await chrome.storage.local.set({
@@ -82,6 +77,10 @@ async function handleIncomingCommand(command) {
     throw new Error("Command must include id and type");
   }
 
+  if (emergencyStopActive) {
+    throw new Error("EMERGENCY_STOP");
+  }
+
   const settings = await getSettings();
   if (!settings.agentControlEnabled) {
     throw new Error("Agent control is disabled");
@@ -119,11 +118,43 @@ async function handleControlMessage(message) {
         return { ok: false, error: error.message };
       }
     }
+    case "emergencyShutdown": {
+      return await handleEmergencyShutdown();
+    }
     default: {
       console.warn("Unknown message type", message?.type);
       return { ok: false, error: "UNKNOWN_MESSAGE_TYPE" };
     }
   }
+}
+
+async function handleEmergencyShutdown() {
+  emergencyStopActive = true;
+  commandQueue.length = 0;
+  recentCommandTimestamps.length = 0;
+
+  const closedTabs = await closeActiveTabSessions();
+
+  const settings = await getSettings();
+  if (settings.agentControlEnabled) {
+    await chrome.storage.local.set({ settings: { ...settings, agentControlEnabled: false } });
+  }
+
+  if (agentBridge) {
+    agentBridge.stop();
+    bridgeStatus = "disconnected";
+  }
+  dataStreamer.stop();
+  processing = false;
+
+  await broadcastExtensionState();
+
+  return {
+    ok: true,
+    status: "shutdown",
+    closedTabs,
+    queueCleared: true
+  };
 }
 
 async function getSettings() {
@@ -139,7 +170,8 @@ async function getExtensionState() {
     queueLength: commandQueue.length,
     processing,
     logs: logs.slice(-20),
-    bridgeStatus
+    bridgeStatus,
+    emergencyStopActive
   };
 }
 
@@ -160,6 +192,13 @@ async function toggleAgentControl(enabled) {
   const settings = await getSettings();
   const next = { ...settings, agentControlEnabled: Boolean(enabled) };
   await chrome.storage.local.set({ settings: next });
+  if (enabled && emergencyStopActive) {
+    emergencyStopActive = false;
+    dataStreamer.start();
+    if (agentBridge) {
+      agentBridge.start();
+    }
+  }
   await broadcastExtensionState();
   return { ok: true, settings: next };
 }
@@ -202,13 +241,13 @@ function matchesOrigin(url, originPattern) {
 }
 
 async function processQueue() {
-  if (processing) {
+  if (processing || emergencyStopActive) {
     return;
   }
   processing = true;
   console.log(`[Queue] Starting to process ${commandQueue.length} commands.`);
   await broadcastExtensionState();
-  while (commandQueue.length) {
+  while (commandQueue.length && !emergencyStopActive) {
     const command = commandQueue.shift();
     console.log(`[Queue] Dequeued command: ${command.type} (${command.id})`);
     const result = await executeCommand(command);
@@ -223,6 +262,10 @@ async function processQueue() {
 }
 
 async function executeCommand(command) {
+  if (emergencyStopActive) {
+    return { status: "failed", errorCode: "EMERGENCY_STOP" };
+  }
+
   const settings = await getSettings();
   try {
     console.log(`[Executor] Executing command: ${command.type} (${command.id})`);
@@ -256,10 +299,7 @@ async function handleOpenUrl(command, settings) {
     return { status: "failed", errorCode: ERROR_CODES.INVALID_COMMAND };
   }
 
-  const openTabs = Array.from(activeTabSessions.keys()).length;
-  if (openTabs >= settings.maxConcurrentTabs) {
-    return { status: "failed", errorCode: "TOO_MANY_TABS" };
-  }
+  await waitForTabSlot(settings.maxConcurrentTabs);
 
   const tab = await chrome.tabs.create({ url, active: false });
   const tabId = tab.id;
@@ -330,22 +370,29 @@ async function handleExecuteSearchTask(command, settings) {
     return { status: "failed", errorCode: ERROR_CODES.INVALID_COMMAND };
   }
 
-  const maxPagesPerTerm = 50;
+  const maxPagesPerTerm = MAX_PAGES_PER_TERM;
 
   console.log(
     `[Search Task ${command.id}] Starting task with ${searchTerms.length} terms.`
   );
 
   for (const [index, term] of searchTerms.entries()) {
+    if (emergencyStopActive) {
+      break;
+    }
+
     let currentPage = 1;
     let keepGoing = true;
     let terminationReason = "";
+    let lastDetectedPage = null;
 
     console.log(
       `[Search Task ${command.id}] Starting term ${index + 1}/${searchTerms.length}: "${term}"`
     );
 
-    while (keepGoing && currentPage <= maxPagesPerTerm) {
+    while (keepGoing && currentPage <= maxPagesPerTerm && !emergencyStopActive) {
+      let tabId;
+      let result = null;
       console.log(
         `[Search Task ${command.id}]  - Attempting to scrape page ${currentPage} for "${term}"`
       );
@@ -371,27 +418,38 @@ async function handleExecuteSearchTask(command, settings) {
         }
       };
 
-      const result = await executeActionCommand(pageCommand);
-      const tabId = result?.tabId;
-
-      const detectedPage = tabId ? await detectActivePageNumber(tabId) : null;
-      console.log(
-        `[Search Task ${command.id}]  - Detected active page on tab ${tabId}: ${detectedPage}`
-      );
-      await cleanupTab(tabId);
+      try {
+        result = await executeActionCommand(pageCommand);
+        tabId = result?.tabId;
+        lastDetectedPage = tabId ? await detectActivePageNumber(tabId) : null;
+        console.log(
+          `[Search Task ${command.id}]  - Detected active page on tab ${tabId}: ${lastDetectedPage}`
+        );
+      } catch (error) {
+        console.error("[Search Task] Page execution failed", error);
+        keepGoing = false;
+        terminationReason = `[Search Task ${command.id}]  - Encountered an error: ${error.message}`;
+      } finally {
+        await cleanupTab(tabId);
+      }
 
       if (result?.status !== "completed") {
         keepGoing = false;
-        terminationReason = `[Search Task ${command.id}]  - A sub-command failed. Concluding search for "${term}".`;
-        break;
+        terminationReason = terminationReason || `[Search Task ${command.id}]  - A sub-command failed. Concluding search for "${term}".`;
       }
 
-      if (detectedPage && detectedPage < currentPage) {
+      if (lastDetectedPage && lastDetectedPage < currentPage) {
         keepGoing = false;
-        terminationReason = `[Search Task ${command.id}]  - Detected page reset (${detectedPage} < ${currentPage}). Concluding search for "${term}".`;
-      } else {
+        terminationReason = `[Search Task ${command.id}]  - Detected page reset (${lastDetectedPage} < ${currentPage}). Concluding search for "${term}".`;
+      }
+
+      if (keepGoing) {
         currentPage += 1;
       }
+    }
+
+    if (emergencyStopActive) {
+      terminationReason = terminationReason || `[Search Task ${command.id}]  - Emergency stop requested. Halting search for "${term}".`;
     }
 
     if (!terminationReason && currentPage > maxPagesPerTerm) {
@@ -401,6 +459,11 @@ async function handleExecuteSearchTask(command, settings) {
     if (terminationReason) {
       console.log(terminationReason);
     }
+  }
+
+  if (emergencyStopActive) {
+    console.log(`[Search Task ${command.id}] Emergency stop activated. Task aborted.`);
+    return { status: "failed", errorCode: "EMERGENCY_STOP" };
   }
 
   console.log(
@@ -471,6 +534,15 @@ async function detectActivePageNumber(tabId) {
   return null;
 }
 
+async function waitForTabSlot(maxConcurrentTabs) {
+  while (activeTabSessions.size >= maxConcurrentTabs) {
+    if (emergencyStopActive) {
+      throw new Error("EMERGENCY_STOP");
+    }
+    await new Promise((resolve) => setTimeout(resolve, TAB_SLOT_POLL_INTERVAL_MS));
+  }
+}
+
 async function cleanupTab(tabId) {
   if (!tabId) {
     return;
@@ -484,6 +556,16 @@ async function cleanupTab(tabId) {
   await chrome.tabs.remove(tabId).catch((error) =>
     console.warn("Failed to close tab", error)
   );
+}
+
+async function closeActiveTabSessions() {
+  let closed = 0;
+  const tabIds = Array.from(activeTabSessions.keys());
+  for (const tabId of tabIds) {
+    await cleanupTab(tabId);
+    closed += 1;
+  }
+  return closed;
 }
 
 async function executeActionCommand(command) {
@@ -620,20 +702,17 @@ async function handleExtractSchema(command) {
       }
     });
 
-    const result = {
+    validatedListings.forEach((record) => {
+      dataStreamer.sendRecord({ commandId: command.id, tabId, ...record });
+    });
+
+    return {
       status: "completed",
-      records: validatedListings,
-      totalListingsFound: listings.length
+      itemsStreamed: validatedListings.length,
+      totalListingsFound: listings.length,
+      rejectedCount: rejectedListings.length,
+      schemaCount: schemas.length
     };
-
-    if (schemas.length) {
-      result.rawSchemas = schemas;
-    }
-    if (rejectedListings.length) {
-      result.rejectedListings = rejectedListings;
-    }
-
-    return result;
   } catch (error) {
     console.error("Schema extraction failed", error);
     return { status: "failed", errorCode: error.message };
@@ -688,9 +767,25 @@ function isUrlRelevant(url) {
   return /etsy\.com/.test(url);
 }
 
+function summarizeResult(command, result) {
+  const summary = {
+    status: result?.status || "unknown",
+    errorCode: result?.errorCode || null,
+    commandType: command?.type
+  };
+
+  ["itemsStreamed", "totalListingsFound", "rejectedCount", "schemaCount"].forEach((key) => {
+    if (result && Object.prototype.hasOwnProperty.call(result, key)) {
+      summary[key] = result[key];
+    }
+  });
+
+  return summary;
+}
+
 async function storeResult(command, result) {
   const { results } = await chrome.storage.local.get({ results: {} });
-  results[command.id] = result;
+  results[command.id] = summarizeResult(command, result);
   await chrome.storage.local.set({ results });
 }
 
@@ -723,22 +818,10 @@ function notifyResult(command, result) {
 }
 
 async function exportCapturedData() {
-  const { results } = await chrome.storage.local.get({ results: {} });
-  const chunks = [];
-  Object.entries(results).forEach(([commandId, record]) => {
-    if (Array.isArray(record.records)) {
-      record.records.forEach((item) => chunks.push(JSON.stringify({ commandId, ...item })));
-    }
-  });
-  const payload = chunks.join("\n");
-  const encoded = encodeBase64(payload);
-  const url = `data:application/x-ndjson;base64,${encoded}`;
-  await chrome.downloads.download({
-    url,
-    filename: `captured_data_${Date.now()}.jsonl`,
-    saveAs: true
-  });
-  return { ok: true };
+  return {
+    ok: true,
+    message: "Data is streamed to the agent in real time; no local export is necessary."
+  };
 }
 
 chrome.runtime.onSuspend.addListener(() => {
@@ -748,4 +831,5 @@ chrome.runtime.onSuspend.addListener(() => {
   activeTabSessions.clear();
 });
 
+dataStreamer.start();
 initializeAgentBridge();
