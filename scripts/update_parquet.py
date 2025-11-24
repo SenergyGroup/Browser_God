@@ -1,16 +1,17 @@
 """Utility script to maintain a historical Parquet store of listing snapshots.
 
-The script reads a JSON Lines file that contains listing records with a
-``captured_at`` timestamp, deduplicates entries for the same listing within a
-single day, and appends new unique records to a Parquet file that serves as the
-master data store. Existing Parquet data is preserved so historical snapshots
-across days remain intact.
+The script reads all JSON Lines files in a directory that contain listing records
+with a ``captured_at`` timestamp, deduplicates entries for the same listing
+within a single day, and appends new unique records to a Parquet file that
+serves as the master data store. Existing Parquet data is preserved so historical
+snapshots across days remain intact.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+from glob import glob
 
 import pandas as pd
 
@@ -19,12 +20,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Deduplicate listing JSONL data by (listing_id, captured_date) and append "
-            "new records to a Parquet history file."
+            "new records from all JSONL files in a directory to a Parquet history file."
         )
     )
     parser.add_argument(
-        "jsonl_path",
-        help="Path to the source JSON Lines file containing listing data.",
+        "jsonl_dir",
+        help="Path to the directory containing JSON Lines files with listing data.",
     )
     parser.add_argument(
         "parquet_path",
@@ -76,7 +77,9 @@ def load_existing_parquet(parquet_path: str) -> pd.DataFrame:
 
     existing = pd.read_parquet(parquet_path)
     if "captured_at" in existing.columns:
-        existing["captured_at"] = pd.to_datetime(existing["captured_at"], errors="coerce")
+        existing["captured_at"] = pd.to_datetime(
+            existing["captured_at"], errors="coerce"
+        )
     if "captured_date" in existing.columns:
         existing["captured_date"] = pd.to_datetime(
             existing["captured_date"], errors="coerce"
@@ -112,15 +115,30 @@ def save_parquet(df: pd.DataFrame, parquet_path: str) -> None:
     df.to_parquet(parquet_path, index=False)
 
 
-def main():
-    jsonl_path = os.path.join("data_streams", "scrape_session_20251123T033924.jsonl")
-    parquet_path = os.path.join("data_streams", "data.parquet")
+def iter_jsonl_files(jsonl_dir: str):
+    """Yield all JSONL file paths in the directory, sorted by name."""
+    pattern = os.path.join(jsonl_dir, "*.jsonl")
+    for path in sorted(glob(pattern)):
+        if os.path.isfile(path):
+            yield path
 
-    new_data = load_jsonl(jsonl_path)
+
+def main():
+    args = parse_args()
+    jsonl_dir = args.jsonl_dir
+    parquet_path = args.parquet_path
+
     existing = load_existing_parquet(parquet_path)
-    updated = append_new_records(new_data, existing)
-    save_parquet(updated, parquet_path)
+
+    for jsonl_path in iter_jsonl_files(jsonl_dir):
+        new_data = load_jsonl(jsonl_path)
+        existing = append_new_records(new_data, existing)
+
+    # After processing all JSONL files, write the final deduplicated store
+    save_parquet(existing, parquet_path)
 
 
 if __name__ == "__main__":
     main()
+
+#Run with python scripts/update_parquet.py data_streams data_streams/data.parquet

@@ -164,23 +164,56 @@ class ManualConsole:
         model = os.getenv("OPENAI_MODEL", "gpt-4o-mini") # or gpt-5-nano
         
         system_prompt = (
-            "You are an expert e-commerce marketing assistant specializing in Etsy. "
-            "Your task is to generate search queries that a real user would type. "
-            "Return a JSON object with a single key 'search_terms' which is an array of 5-10 concise and diverse search terms. "
-            "Focus on including a mix of product types, long-tail keywords, and user intents (e.g., gifts, custom orders)."
-            "\n\n"
-            "Example for the topic 'vintage cameras':\n"
+            "You are an expert e-commerce marketing assistant specializing in DIGITAL DOWNLOADS "
+            "for creators and streamers (Twitch, YouTube, VTubers, OBS, etc).\n\n"
+            "Your job:\n"
+            "Given a short topic from the user (usually 1–3 words), generate 5–10 Etsy search "
+            "queries that a buyer would type when looking for DIGITAL PRODUCTS ONLY.\n\n"
+            "HARD CONSTRAINTS (MUST FOLLOW):\n"
+            "1) Every search term MUST clearly describe a downloadable digital asset.\n"
+            "   It must NOT describe a person, job, service, course, guide, or story.\n"
+            "   Forbidden result types include (but are not limited to):\n"
+            "   - moderator, manager, assistant, editor, designer, coach, consultant\n"
+            "   - \"for hire\", \"service\", \"commission\", \"custom work\", \"coaching\"\n"
+            "   - tutorial, guide, ebook, course, success stories, tips, checklist\n\n"
+            "2) Only include products that can realistically be created as:\n"
+            "   - HTML/CSS/JavaScript widgets or overlays, OR\n"
+            "   - Static or animated graphics (PNG, JPG, GIF, WebM, PSD, etc).\n"
+            "   No physical products, printing, or manufactured items.\n\n"
+            "3) Each search term MUST contain at least one clear digital product noun, such as:\n"
+            "   overlay, widget, alert, panel, banner, template, layout, scene, frame, background,\n"
+            "   screen, asset pack, pack, bundle, kit, emote, badge, icon, lower third.\n"
+            "   If a term does not contain at least one of these product nouns, do NOT output it.\n\n"
+            "4) Terms must be 2–7 words long and sound like real Etsy searches.\n"
+            "   Allowed platform words: Twitch, YouTube, OBS, Streamlabs, VTuber, streamer.\n"
+            "   Do NOT include quotes or special characters.\n\n"
+            "BEHAVIOR:\n"
+            "• Start from the topic and imagine digital files the user could sell that use that idea.\n"
+            "• Prefer specific, purchase-ready phrasing such as \"twitch chat overlay widget\" instead of\n"
+            "  broad ideas like \"twitch chat\" or roles like \"twitch chat moderator\".\n"
+            "• Include a mix of:\n"
+            "  - Exact matches of the topic plus a product noun\n"
+            "  - Adjacent use cases and styles (cute, neon, minimal, animated, etc)\n"
+            "  - Bundles or packs (pack, bundle, kit, set)\n\n"
+            "If you cannot produce 5–10 valid terms that obey all rules, produce as many valid terms as you can.\n\n"
+            "OUTPUT FORMAT:\n"
+            "Return a JSON object with a single key 'search_terms' whose value is an array of 5–10 strings.\n"
+            "Do NOT include any extra keys and do NOT include explanations.\n\n"
+            "Example for the topic 'twitch chat widget':\n"
             "{\n"
-            '  "search_terms": [\n'
-            '    "retro polaroid camera",\n'
-            '    "working 8mm film camera",\n'
-            '    "35mm point and shoot camera",\n'
-            '    "vintage kodak brownie camera",\n'
-            '    "camera collector gift",\n'
-            '    "antique folding camera"\n'
-            '  ]\n'
-            "}"
+            "  \"search_terms\": [\n"
+            "    \"twitch chat overlay widget\",\n"
+            "    \"animated twitch chat widget\",\n"
+            "    \"twitch stream chat box overlay\",\n"
+            "    \"twitch chat overlay png\",\n"
+            "    \"vtuber chat widget overlay\",\n"
+            "    \"twitch chat overlay pack\",\n"
+            "    \"neon twitch chat overlay\",\n"
+            "    \"minimal twitch chat box template\"\n"
+            "  ]\n"
+            "}\n"
         )
+
         user_prompt = f"Topic: {topic}"
 
         try:

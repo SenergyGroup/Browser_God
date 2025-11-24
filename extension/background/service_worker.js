@@ -59,7 +59,7 @@ function initializeAgentBridge() {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const messageType = message?.type;
-  console.log("Service worker received message", messageType, message);
+  // console.log("Service worker received message", messageType, message);
 
   (async () => {
     const response = await handleControlMessage(message);
@@ -122,7 +122,7 @@ async function handleControlMessage(message) {
       return await handleEmergencyShutdown();
     }
     default: {
-      console.warn("Unknown message type", message?.type);
+      // console.warn("Unknown message type", message?.type);
       return { ok: false, error: "UNKNOWN_MESSAGE_TYPE" };
     }
   }
@@ -322,7 +322,6 @@ async function handleOpenUrl(command, settings) {
     settings
   });
 
-  // IMPORTANT: accept actions from either payload.actions or command.actions
   const actions =
     Array.isArray(command.payload?.actions)
       ? command.payload.actions
@@ -330,7 +329,6 @@ async function handleOpenUrl(command, settings) {
         ? command.actions
         : [];
 
-  // Collect records from nested actions (especially CAPTURE_JSON_FROM_DEVTOOLS)
   const collectedRecords = [];
 
   if (actions.length > 0) {
@@ -341,7 +339,6 @@ async function handleOpenUrl(command, settings) {
         payload: { ...action.payload, tabId }
       };
 
-      // This will call executeCommand, then storeResult/log/notify/broadcast
       const actionResult = await executeActionCommand(actionCommand);
 
       if (Array.isArray(actionResult.records)) {
@@ -397,11 +394,27 @@ async function handleExecuteSearchTask(command, settings) {
         `[Search Task ${command.id}]  - Attempting to scrape page ${currentPage} for "${term}"`
       );
       const randomDelay = Math.floor(Math.random() * (3000 - 1500 + 1)) + 1500;
+      
+      // ----------------------------------------------------------------
+      // MODIFICATION: Inject Page Metadata into EXTRACT_SCHEMA command
+      // ----------------------------------------------------------------
       const actions = (SEARCH_TASK_TEMPLATE.actionsPerPage || []).map((action) => {
         const payload = { ...(action.payload || {}) };
+        
         if (action.type === COMMAND_TYPES.WAIT) {
           payload.milliseconds = randomDelay;
         }
+
+        // Pass metadata to the schema extractor so it knows where we are
+        if (action.type === COMMAND_TYPES.EXTRACT_SCHEMA) {
+            payload.metadata = {
+                ...(payload.metadata || {}),
+                search_page: currentPage,
+                search_term: term,
+                scraped_at: new Date().toISOString()
+            };
+        }
+
         return { type: action.type, payload };
       });
 
@@ -472,8 +485,6 @@ async function handleExecuteSearchTask(command, settings) {
   await exportCapturedData();
   return { status: "completed" };
 }
-
-
 
 async function waitForTabLoad(tabId) {
   return new Promise((resolve) => {
@@ -600,23 +611,11 @@ async function handleCaptureJson(command, settings) {
   }
 
   const session = activeTabSessions.get(tabId);
-
-  // Set capture mode, but DO NOT wipe the bodies we already collected
-  const captureType =
-    command.payload?.captureType || session.captureMode || "listings";
+  const captureType = command.payload?.captureType || session.captureMode || "listings";
   session.captureMode = captureType;
-
-  // IMPORTANT: remove this line so we keep responses from navigation + scroll
-  // session.capturedBodies = [];
 
   const waitMs = command.payload?.waitForMs ?? 5000;
   await new Promise((resolve) => setTimeout(resolve, waitMs));
-
-  // Optional debug, can help sanity-check:
-  console.log(
-    "handleCaptureJson: capturedBodies length",
-    session.capturedBodies.length
-  );
 
   const parsedRecords = [];
   for (const body of session.capturedBodies) {
@@ -626,8 +625,6 @@ async function handleCaptureJson(command, settings) {
 
     try {
       const json = JSON.parse(body.raw);
-
-      // TEMP: store raw captures instead of strict Etsy listing/review objects
       parsedRecords.push({
         source: "raw",
         url: body.url,
@@ -638,7 +635,6 @@ async function handleCaptureJson(command, settings) {
       console.warn("Failed to parse response", error);
     }
   }
-
 
   await chrome.debugger.detach({ tabId }).catch((error) =>
     console.warn("Failed to detach", error)
@@ -652,28 +648,6 @@ async function handleCaptureJson(command, settings) {
   }
 
   return { status: "completed", records: parsedRecords };
-}
-
-
-function applyTransformers(session, json, url) {
-  const results = [];
-  if (session.captureMode === "listings" && session.transformers.listings) {
-    const transformed = session.transformers.listings(json, url);
-    if (Array.isArray(transformed)) {
-      results.push(...transformed);
-    } else if (transformed) {
-      results.push(transformed);
-    }
-  }
-  if (session.captureMode === "reviews" && session.transformers.reviews) {
-    const transformed = session.transformers.reviews(json, url);
-    if (Array.isArray(transformed)) {
-      results.push(...transformed);
-    } else if (transformed) {
-      results.push(transformed);
-    }
-  }
-  return results;
 }
 
 async function handleExtractSchema(command) {
@@ -702,8 +676,16 @@ async function handleExtractSchema(command) {
       }
     });
 
+    // ----------------------------------------------------------------
+    // MODIFICATION: Attach Metadata (Page, Term) to Record
+    // ----------------------------------------------------------------
     validatedListings.forEach((record) => {
-      dataStreamer.sendRecord({ commandId: command.id, tabId, ...record });
+        // Merge metadata passed from EXECUTE_SEARCH_TASK
+        const enrichedRecord = {
+            ...record,
+            ...(command.payload.metadata || {}) 
+        };
+      dataStreamer.sendRecord({ commandId: command.id, tabId, ...enrichedRecord });
     });
 
     return {
@@ -749,19 +731,10 @@ async function handleResponseReceived(tabId, params) {
     );
     const raw = base64Encoded ? atob(body) : body;
     session.capturedBodies.push({ url, raw });
-
-    // DEBUG: how many JSON responses have we collected so far?
-    console.log(
-      "handleResponseReceived capturedBodies length",
-      tabId,
-      session.capturedBodies.length,
-      url
-    );
   } catch (error) {
     console.warn("Failed to read response body", error);
   }
 }
-
 
 function isUrlRelevant(url) {
   return /etsy\.com/.test(url);

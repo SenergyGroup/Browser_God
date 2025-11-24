@@ -78,6 +78,18 @@ function isEtsySearchPage() {
   return /etsy\.com$/i.test(location.hostname) && /search/i.test(location.pathname);
 }
 
+// --- HELPER: Parse "2k", "1.5M", etc. ---
+function parseKNotation(str) {
+  if (!str) return 0;
+  const lower = str.toLowerCase().replace(/[(),]/g, "").trim();
+  let multiplier = 1;
+  if (lower.endsWith("k")) multiplier = 1000;
+  if (lower.endsWith("m")) multiplier = 1000000;
+  
+  const num = parseFloat(lower);
+  return Number.isFinite(num) ? num * multiplier : 0;
+}
+
 function parsePrice(priceText) {
   if (!priceText) {
     return { value: 0, currency: "USD" };
@@ -100,6 +112,34 @@ function parsePrice(priceText) {
 }
 
 function parseRating(card) {
+  // STRATEGY 1: V2 Card (aria-label on div role=img)
+  // HTML: <div role="img" aria-label="4.9 star rating with 2k reviews">
+  const v2RatingNode = card.querySelector('div[role="img"][aria-label*="star rating"]');
+  
+  if (v2RatingNode) {
+    const label = v2RatingNode.getAttribute("aria-label") || "";
+    // Match "4.9"
+    const ratingMatch = label.match(/([\d\.]+)\s*star rating/i);
+    const ratingValue = ratingMatch ? parseFloat(ratingMatch[1]) : null;
+
+    // Match "2k" inside the label OR look for the sibling text
+    // The HTML shows <p class="wt-text-body-smaller">(2k)</p> inside the rating container
+    const countNode = card.querySelector(".shop-name-with-rating p.wt-text-body-smaller") 
+                   || card.querySelector(".larger_review_stars p");
+    
+    let ratingCount = 0;
+    if (countNode) {
+        ratingCount = parseKNotation(countNode.textContent);
+    } else {
+        // Fallback: try to extract from aria-label "with 2000 reviews"
+        const countMatch = label.match(/with\s*([\d\.kKmM,]+)\s*reviews/i);
+        if (countMatch) ratingCount = parseKNotation(countMatch[1]);
+    }
+
+    return { ratingValue, ratingCount };
+  }
+
+  // STRATEGY 2: Legacy Fallback
   const ratingNode =
     card.querySelector('[aria-label*="out of 5 stars" i]') ||
     card.querySelector('[data-rating]') ||
@@ -139,15 +179,32 @@ function extractImageAlts(card) {
 }
 
 function extractBadges(card) {
-  const badgeCandidates = [
+  const badges = new Set();
+
+  // 1. Standard Badges (Bestseller, Etsy's Pick)
+  const badgeNodes = [
     ...Array.from(card.querySelectorAll("[data-badge]")),
-    ...Array.from(card.querySelectorAll(".wt-badge, .listing-card-badge")),
+    ...Array.from(card.querySelectorAll(".wt-badge")),
+    ...Array.from(card.querySelectorAll(".listing-card-badge")),
     ...Array.from(card.querySelectorAll("[aria-label*='Free shipping' i]"))
   ];
-  const badges = badgeCandidates
-    .map((node) => node.textContent?.trim())
-    .filter((text) => text && text.length > 0);
-  return Array.from(new Set(badges));
+  
+  badgeNodes.forEach(node => {
+      const text = node.textContent?.trim();
+      if (text) badges.add(text);
+  });
+
+  // 2. Ad Detection (Based on obfuscated HTML structure)
+  // Look for text "ad by" or "advertisement" in the seller container
+  const sellerContainer = card.querySelector('div.shop-name-with-rating') || card.querySelector('.v2-listing-card__shop');
+  if (sellerContainer) {
+      const textContent = sellerContainer.innerText.toLowerCase(); // innerText handles hidden spans better
+      if (textContent.includes("ad by") || textContent.includes("advertisement")) {
+          badges.add("Ad");
+      }
+  }
+
+  return Array.from(badges);
 }
 
 function parseAppearsEventData(card) {
@@ -216,18 +273,30 @@ function extractPriceDetails(card) {
 
 function extractEtsyListings() {
   const now = new Date().toISOString();
+  // Added .v2-listing-card to selector
   const cards = Array.from(
-    document.querySelectorAll("li.js-merch-stash-check-listing, [data-listing-id]")
+    document.querySelectorAll("li.js-merch-stash-check-listing, div.v2-listing-card, [data-listing-id]")
   );
 
   const listings = [];
+  const processedIds = new Set();
+
   cards.forEach((card) => {
+    // Prevent processing nested elements or duplicates
+    if (card.closest('.js-merch-stash-check-listing') && card.tagName !== 'LI' && card.className.includes('v2-listing-card')) {
+       // If we selected the inner DIV but we already have the LI, skip
+       return;
+    }
+
     const listingId =
       card.getAttribute("data-listing-id") ||
       card.dataset.listingId ||
       card.querySelector("[data-listing-id]")?.getAttribute("data-listing-id") ||
       (card.querySelector("a[href*='/listing/']")?.href.match(/listing\/(\d+)/) || [])[1] ||
       "";
+
+    if (!listingId || processedIds.has(listingId)) return;
+    processedIds.add(listingId);
 
     const link =
       card.querySelector("a.listing-link") ||
@@ -245,11 +314,12 @@ function extractEtsyListings() {
 
     const { ratingValue, ratingCount } = parseRating(card);
 
+    // UPDATED SELLER SELECTOR for V2
     const sellerName =
+      card.querySelector(".clickable-shop-name")?.textContent || 
+      card.querySelector("p[data-seller-name-container] a")?.textContent ||
       card.querySelector(".v2-listing-card__shop .text-body-smaller")?.textContent ||
       card.querySelector("[data-shop-name]")?.getAttribute("data-shop-name") ||
-      card.querySelector("[data-shop-name]")?.textContent ||
-      card.querySelector(".shop-name")?.textContent ||
       "";
 
     const sellerId =
@@ -272,9 +342,11 @@ function extractEtsyListings() {
       card.querySelector("[data-logging-key]")?.getAttribute("data-logging-key") ||
       "";
 
-    if (!listingId && !link?.href) {
-      return;
-    }
+    // UPDATED VIDEO DETECTION
+    const hasVideo = Boolean(card.querySelector("video") || card.querySelector(".listing-card-video-container"));
+
+    // We append hasVideo to features or tags if you want, 
+    // but preserving your original schema structure below:
 
     listings.push({
       source: "etsy",
@@ -296,8 +368,8 @@ function extractEtsyListings() {
       is_on_sale: priceDetails.isOnSale,
       rating_value: ratingValue,
       rating_count: ratingCount,
-      favorites: 0,
-      tags: [],
+      favorites: 0, // Etsy removed public favorites count from search cards in V2
+      tags: hasVideo ? ["video"] : [],
       category: "",
       seller: {
         id: sellerId || "",
@@ -329,7 +401,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message.type === "EXTRACT_SCHEMA") {
-    sendResponse(extractSchemas(message.payload || {}));
+    sendResponse({ ok: true, data: { listings: extractEtsyListings(), schemas: [] } });
     return false;
   }
   if (message.type === "GET_ACTIVE_PAGE") {
