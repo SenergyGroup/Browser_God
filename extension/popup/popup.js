@@ -140,6 +140,25 @@ document.getElementById("trigger-test-command").addEventListener("click", async 
   }
 });
 
+document.getElementById("run-queue").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const originalText = button.innerText;
+  button.disabled = true;
+  button.innerText = "SYNCING...";
+
+  try {
+    await chrome.runtime.sendMessage({ type: "GET_NEXT_JOB" });
+  } catch (error) {
+    console.error("Failed to start queue run", error);
+  } finally {
+    setTimeout(() => {
+      button.disabled = false;
+      button.innerText = originalText;
+      refreshState();
+    }, 500);
+  }
+});
+
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === "commandResult" || message?.type === "extensionState") {
     refreshState();

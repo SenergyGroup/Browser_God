@@ -5,11 +5,13 @@ import asyncio
 import json
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import WebSocket
 
-from ..schemas.command import Command, EnqueueCommandRequest
+from ..database import get_supabase_client
+from ..schemas.command import Command, CommandType, EnqueueCommandRequest
 from .events import EventBroker
 
 LOGGER = logging.getLogger(__name__)
@@ -65,12 +67,17 @@ class ExtensionBridge:
             return
 
         if message.get("type") == "commandResult":
+            await self._mark_action_review_ready(message)
             await self._event_broker.publish(message)
             return
 
         if message.get("type") == "extensionState":
             self._latest_state = message.get("payload")
             await self._event_broker.publish(message)
+            return
+
+        if message.get("type") == "GET_NEXT_JOB":
+            await self._handle_job_request(message)
             return
 
         LOGGER.debug("Unhandled extension message: %s", message)
@@ -119,6 +126,57 @@ class ExtensionBridge:
 
     def latest_state(self) -> Optional[Dict[str, Any]]:
         return self._latest_state
+
+    async def _handle_job_request(self, message: Dict[str, Any]) -> None:
+        request_id = message.get("requestId")
+        job_response: Dict[str, Any]
+        try:
+            job_response = await self._get_next_job_payload()
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to fetch next job from Supabase")
+            job_response = {"job_available": False, "error": "FETCH_FAILED"}
+
+        response = {"type": "NEXT_JOB", "requestId": request_id, **job_response}
+        try:
+            async with self._lock:
+                if self._extension_socket is not None:
+                    await self._extension_socket.send_text(json.dumps(response))
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to return job response to extension")
+
+    async def _get_next_job_payload(self) -> Dict[str, Any]:
+        supabase = get_supabase_client()
+
+        result = supabase.table("search_actions").select("*").eq("status", "QUEUED").limit(1).execute()
+        rows = result.data or []
+        if not rows:
+            return {"job_available": False}
+
+        action = rows[0]
+        action_id = action["id"]
+        search_phrase = action.get("search_phrase")
+
+        supabase.table("search_actions").update(
+            {"status": "PROCESSING", "run_at": datetime.now(timezone.utc).isoformat()}
+        ).eq("id", action_id).execute()
+
+        command = Command(
+            id=str(action_id),
+            type=CommandType.EXECUTE_SEARCH_TASK,
+            payload={"searchTerms": [search_phrase]},
+        )
+
+        return {"job_available": True, "command": command.model_dump(mode="json")}
+
+    async def _mark_action_review_ready(self, message: Dict[str, Any]) -> None:
+        command_id = message.get("commandId")
+        if not command_id:
+            return
+        try:
+            supabase = get_supabase_client()
+            supabase.table("search_actions").update({"status": "REVIEW_READY"}).eq("id", command_id).execute()
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to mark action as review ready", extra={"commandId": command_id})
 
 
 __all__ = ["ExtensionBridge"]

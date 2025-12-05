@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
-from pathlib import Path
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 
+from ..database import get_supabase_client
 from ..documentation import get_schema_documentation
 from ..messaging.bridge import ExtensionBridge
 from ..messaging.events import EventBroker
@@ -82,17 +83,12 @@ async def extension_socket(
 
 @router.websocket("/ws/data")
 async def data_stream(websocket: WebSocket) -> None:
-    """Stream scraped records to a JSONL file for each session."""
+    """Stream scraped records directly into Supabase."""
 
     await websocket.accept()
+    supabase = get_supabase_client()
 
-    data_dir = Path("data_streams")
-    data_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-    file_path = data_dir / f"scrape_session_{timestamp}.jsonl"
-
-    LOGGER.info("Data stream opened: %s", file_path)
-    file_handle = file_path.open("a", encoding="utf-8")
+    LOGGER.info("Data stream opened for ingestion")
 
     try:
         while True:
@@ -100,17 +96,37 @@ async def data_stream(websocket: WebSocket) -> None:
             try:
                 payload = json.loads(message)
             except json.JSONDecodeError:
-                payload = message
+                LOGGER.warning("Dropping non-JSON payload from data stream: %s", message)
+                continue
 
-            serialized = json.dumps(payload, ensure_ascii=False)
-            file_handle.write(f"{serialized}\n")
-            file_handle.flush()
+            image_url = None
+            image_urls = payload.get("image_urls")
+            if isinstance(image_urls, list) and image_urls:
+                first_image = image_urls[0]
+                if isinstance(first_image, str):
+                    image_url = first_image
+
+            record = {
+                "id": str(uuid.uuid4()),
+                "action_id": payload.get("commandId"),
+                "title": payload.get("title"),
+                "price_value": payload.get("price_value"),
+                "image_url": image_url,
+                "item_url": payload.get("url") or payload.get("item_url"),
+                "rating_value": payload.get("rating_value"),
+                "review_count": payload.get("rating_count"),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+            try:
+                supabase.table("scraped_items").insert(record).execute()
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Failed to insert scraped item", extra={"record": record})
     except WebSocketDisconnect:
-        LOGGER.info("Data stream disconnected: %s", file_path)
+        LOGGER.info("Data stream disconnected")
     except Exception:  # noqa: BLE001
         LOGGER.exception("Data stream error")
     finally:
-        file_handle.close()
         await websocket.close()
 
 
