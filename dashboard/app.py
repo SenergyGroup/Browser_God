@@ -7,6 +7,8 @@ from typing import Any, Dict, List
 import streamlit as st
 from supabase import create_client
 
+from dotenv import load_dotenv
+
 
 @st.cache_resource(show_spinner=False)
 def get_supabase():
@@ -17,7 +19,8 @@ def get_supabase():
 
 def fetch_queue_items(status: str) -> List[Dict[str, Any]]:
     client = get_supabase()
-    response = client.table("search_actions").select("*").eq("status", status).order("run_at", desc=False).execute()
+    # Orders by run_at (oldest first) for queue, or created_at for reviews
+    response = client.table("search_actions").select("*").eq("status", status).order("id", desc=False).execute()
     return response.data or []
 
 
@@ -48,13 +51,12 @@ def render_queue_tab() -> None:
                 if st.button("Approve", key=f"approve-{action['id']}"):
                     update_action(action["id"], {"status": "QUEUED"})
                     st.success("Action approved and queued.")
-                    st.experimental_rerun()
+                    st.rerun()
             with cols[1]:
                 if st.button("Reject", key=f"reject-{action['id']}"):
                     update_action(action["id"], {"status": "REJECTED"})
                     st.warning("Action rejected.")
-                    st.experimental_rerun()
-
+                    st.rerun()
 
 
 def render_review_tab() -> None:
@@ -69,6 +71,7 @@ def render_review_tab() -> None:
         with st.expander(action.get("search_phrase", "(unknown phrase)"), expanded=True):
             items = fetch_scraped_items(action["id"])
             if items:
+                # Basic dataframe view - you can upgrade this to st.image grid later
                 st.dataframe(items)
             else:
                 st.write("No scraped items for this action yet.")
@@ -76,18 +79,20 @@ def render_review_tab() -> None:
             cols = st.columns(2)
             with cols[0]:
                 if st.button("Market Gap Found", key=f"gap-{action['id']}"):
-                    update_action(action["id"], {"market_gap_found": True})
+                    # Updates status to COMPLETED so it leaves the review list
+                    update_action(action["id"], {"market_gap_found": True, "status": "COMPLETED"})
                     st.success("Marked as gap found.")
-                    st.experimental_rerun()
+                    st.rerun()
             with cols[1]:
                 if st.button("Saturated / No Gap", key=f"nogap-{action['id']}"):
-                    update_action(action["id"], {"market_gap_found": False})
+                    # Updates status to COMPLETED so it leaves the review list
+                    update_action(action["id"], {"market_gap_found": False, "status": "COMPLETED"})
                     st.info("Marked as saturated.")
-                    st.experimental_rerun()
-
+                    st.rerun()
 
 
 def main() -> None:
+    load_dotenv()
     st.set_page_config(page_title="Browser God Queue", layout="wide")
     st.title("Browser God Queue Manager")
 

@@ -169,14 +169,20 @@ class ExtensionBridge:
         return {"job_available": True, "command": command.model_dump(mode="json")}
 
     async def _mark_action_review_ready(self, message: Dict[str, Any]) -> None:
-        command_id = message.get("commandId")
-        if not command_id:
+        raw_id = message.get("commandId")
+        if not raw_id:
             return
+        
+        # --- FIX: Clean the ID ---
+        # The extension sends "UUID:Step:Action". We only want the UUID.
+        clean_id = raw_id.split(":")[0]
+
         try:
             supabase = get_supabase_client()
-            supabase.table("search_actions").update({"status": "REVIEW_READY"}).eq("id", command_id).execute()
+            supabase.table("search_actions").update({"status": "REVIEW_READY"}).eq("id", clean_id).execute()
+            LOGGER.info(f"Marked action {clean_id} as REVIEW_READY")
         except Exception:  # noqa: BLE001
-            LOGGER.exception("Failed to mark action as review ready", extra={"commandId": command_id})
+            LOGGER.exception("Failed to mark action as review ready", extra={"commandId": raw_id})
 
 
 __all__ = ["ExtensionBridge"]

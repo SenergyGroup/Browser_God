@@ -101,12 +101,14 @@ function parsePrice(priceText) {
 
 function parseRating(card) {
   const ratingNode =
+    card.querySelector('[aria-label*="star rating" i]') || 
     card.querySelector('[aria-label*="out of 5 stars" i]') ||
+    card.querySelector(".shop-name-with-rating .wt-text-title-small") || // Targets the visible "4.8"
     card.querySelector('[data-rating]') ||
     card.querySelector(".wt-screen-reader-only");
 
   const ratingText = ratingNode?.getAttribute("aria-label") || ratingNode?.textContent || "";
-  const ratingMatch = ratingText.match(/([0-9.]+)\s*out of 5/i);
+  const ratingMatch = ratingText.match(/([0-9.]+)\s*(?:out of|star rating)/i) || ratingText.match(/^([0-9.]+)$/);
   const ratingValue = ratingMatch ? Number(ratingMatch[1]) : null;
 
   const countNode =
@@ -216,11 +218,17 @@ function extractPriceDetails(card) {
 
 function extractEtsyListings() {
   const now = new Date().toISOString();
+  // 1. Get the page number immediately
+  const pageNumber = detectActivePageNumber() || 1; 
+
   const cards = Array.from(
     document.querySelectorAll("li.js-merch-stash-check-listing, [data-listing-id]")
   );
 
   const listings = [];
+  // 2. Create a Set to track IDs found on this specific page to prevent duplicates
+  const seenIds = new Set();
+
   cards.forEach((card) => {
     const listingId =
       card.getAttribute("data-listing-id") ||
@@ -234,6 +242,17 @@ function extractEtsyListings() {
       card.querySelector("a[data-listing-id]") ||
       card.querySelector("a[href*='/listing/']");
 
+    // Skip if no ID or no Link
+    if (!listingId && !link?.href) {
+      return;
+    }
+
+    // Skip if we have already processed this ID on this scan
+    if (seenIds.has(listingId)) {
+      return;
+    }
+    seenIds.add(listingId);
+
     const title =
       card.querySelector(".v2-listing-card__title")?.textContent ||
       link?.getAttribute("title") ||
@@ -246,11 +265,19 @@ function extractEtsyListings() {
     const { ratingValue, ratingCount } = parseRating(card);
 
     const sellerName =
+      card.querySelector(".clickable-shop-name")?.textContent || 
+      card.querySelector("[data-seller-name-link]")?.textContent ||
+      card.querySelector("[data-seller-name-container]")?.textContent ||
       card.querySelector(".v2-listing-card__shop .text-body-smaller")?.textContent ||
       card.querySelector("[data-shop-name]")?.getAttribute("data-shop-name") ||
       card.querySelector("[data-shop-name]")?.textContent ||
       card.querySelector(".shop-name")?.textContent ||
       "";
+    
+    const cleanSellerName = sellerName
+      .replace(/^Ad\s*[·・-]\s*By\s+/i, "") 
+      .replace(/^By\s+/i, "")              
+      .trim();
 
     const sellerId =
       card.getAttribute("data-shop-id") ||
@@ -272,14 +299,11 @@ function extractEtsyListings() {
       card.querySelector("[data-logging-key]")?.getAttribute("data-logging-key") ||
       "";
 
-    if (!listingId && !link?.href) {
-      return;
-    }
-
     listings.push({
       source: "etsy",
       url: link?.href || "",
       captured_at: now,
+      page_number: pageNumber, // <--- Added Page Number Here
       listing_id: listingId || (link?.href ? link.href : ""),
       title: title.trim(),
       description: thumbnailAlt?.trim() || "",
@@ -301,7 +325,7 @@ function extractEtsyListings() {
       category: "",
       seller: {
         id: sellerId || "",
-        name: sellerName.trim()
+        name: cleanSellerName 
       },
       image_urls: imageUrls,
       image_alt_texts: imageAltTexts,
@@ -309,7 +333,7 @@ function extractEtsyListings() {
       search_query: query,
       appears_event_data: appearsEventData,
       position: Number.isFinite(position) ? position : null,
-      logging_key: loggingKey
+      logging_key: loggingKey,
     });
   });
 
@@ -340,26 +364,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 function detectActivePageNumber() {
-  console.log("[Content Script] Attempting to find active page number.");
-  const activeButton =
-    document.querySelector('[aria-current="page"], [aria-current="true"], nav[aria-label*="Pagination" i] [aria-current]') ||
-    document.querySelector("[data-page][aria-current]");
+  // 1. STRATEGY: Visual Confirmation (The Source of Truth)
+  // If the user sees the "1" button highlighted, we are on page 1, 
+  // regardless of what the URL claims.
+  const activeNode =
+    document.querySelector('nav[aria-label="Pagination"] [aria-current="page"]') ||
+    document.querySelector('[aria-current="page"]') ||
+    document.querySelector(".wt-action-group__item-container .wt-btn--filled");
 
-  const pageText = activeButton?.textContent?.trim() || activeButton?.getAttribute("data-page") || "";
-  const pageNumber = Number.parseInt(pageText, 10);
-  if (Number.isFinite(pageNumber)) {
-    console.log(`[Content Script] Found active page number: ${pageNumber}`);
-    return pageNumber;
+  if (activeNode) {
+    const pageText = activeNode.textContent?.trim();
+    const domPage = parseInt(pageText, 10);
+    if (Number.isFinite(domPage)) {
+      console.log(`[Content Script] Visual page confirmed: ${domPage}`);
+      return domPage;
+    }
   }
 
-  const fallback = document.querySelector(".wt-action-group__item button[aria-current]");
-  const fallbackText = fallback?.textContent?.trim() || "";
-  const fallbackNumber = Number.parseInt(fallbackText, 10);
-  if (Number.isFinite(fallbackNumber)) {
-    console.log(`[Content Script] Found active page number via fallback: ${fallbackNumber}`);
-    return fallbackNumber;
+  // 2. STRATEGY: URL Check (Fallback)
+  // If we couldn't find the buttons (maybe infinite scroll or CSS change),
+  // we trust the URL.
+  try {
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.has("page")) {
+      const urlPage = parseInt(urlParams.get("page"), 10);
+      if (Number.isFinite(urlPage)) {
+        console.log(`[Content Script] URL page param found: ${urlPage}`);
+        return urlPage;
+      }
+    }
+  } catch (e) {
+    console.warn("Error parsing URL params", e);
   }
 
-  console.log("[Content Script] Could not find an active page number.");
-  return null;
+  // 3. STRATEGY: Default
+  console.log("[Content Script] No page number detected. Defaulting to 1.");
+  return 1;
 }

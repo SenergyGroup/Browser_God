@@ -555,7 +555,7 @@ async function detectActivePageNumber(tabId) {
   } catch (error) {
     console.warn("Failed to detect active page", error);
   }
-  return null;
+  return 1;
 }
 
 async function waitForTabSlot(maxConcurrentTabs) {
