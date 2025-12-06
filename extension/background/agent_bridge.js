@@ -21,6 +21,7 @@ export class AgentBridge {
     this.reconnectAttempts = 0;
     this.outbox = [];
     this.shouldRun = false;
+    this.pendingJobRequests = new Map();
   }
 
   start() {
@@ -136,7 +137,41 @@ export class AgentBridge {
       return;
     }
 
+    if (message?.type === "NEXT_JOB" && message.requestId) {
+      const pending = this.pendingJobRequests.get(message.requestId);
+      if (pending) {
+        clearTimeout(pending.timeout);
+        pending.resolve(message);
+        this.pendingJobRequests.delete(message.requestId);
+      }
+      return;
+    }
+
     console.debug("Received unhandled agent event", message);
+  }
+
+  async requestNextJob() {
+    const requestId = globalThis.crypto?.randomUUID
+      ? globalThis.crypto.randomUUID()
+      : Math.random().toString(36).slice(2);
+
+    const payload = { type: "GET_NEXT_JOB", requestId };
+    const responsePromise = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingJobRequests.delete(requestId);
+        reject(new Error("NEXT_JOB_TIMEOUT"));
+      }, 10000);
+      this.pendingJobRequests.set(requestId, { resolve, reject, timeout });
+    });
+
+    this.emit(payload);
+    return responsePromise.finally(() => {
+      const pending = this.pendingJobRequests.get(requestId);
+      if (pending?.timeout) {
+        clearTimeout(pending.timeout);
+      }
+      this.pendingJobRequests.delete(requestId);
+    });
   }
 
   async safeHandleRequest(payload) {

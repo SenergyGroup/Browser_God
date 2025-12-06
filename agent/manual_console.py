@@ -5,13 +5,10 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 from typing import Any, Dict
 
 import httpx
 import websockets
-
-from .schemas.command import CommandType
 from dotenv import load_dotenv
 
 LOGGER = logging.getLogger(__name__)
@@ -75,9 +72,6 @@ class ManualConsole:
             if command == "state":
                 await self._show_state()
                 continue
-            if command.startswith("ai_task "):
-                await self._run_ai_task(command)
-                continue
             if command.startswith("toggle"):
                 await self._toggle(command)
                 continue
@@ -135,109 +129,6 @@ class ManualConsole:
         except Exception as error:  # noqa: BLE001
             print(f"Failed to fetch state: {error}")
 
-    async def _run_ai_task(self, command: str) -> None:
-        parts = command.split(maxsplit=1)
-        if len(parts) != 2 or not parts[1].strip():
-            print('Usage: ai_task "<search topic>"')
-            return
-
-        topic = parts[1].strip().strip('"')
-        search_terms = await self._generate_search_terms(topic)
-        if not search_terms:
-            print("Failed to generate search terms")
-            return
-
-        LOGGER.info(
-            "Generated %s search terms: %s. Sending to extension.",
-            len(search_terms),
-            search_terms,
-        )
-        payload = {"searchTerms": search_terms}
-        await self._send_command(CommandType.EXECUTE_SEARCH_TASK.value, payload)
-
-    async def _generate_search_terms(self, topic: str) -> list[str]:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            print("Missing OPENAI_API_KEY environment variable")
-            return []
-
-        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini") # or gpt-5-nano
-        
-        system_prompt = (
-            "You are an expert e-commerce marketing assistant specializing in Etsy. "
-            "Your task is to generate search queries that a real user would type. "
-            "Return a JSON object with a single key 'search_terms' which is an array of 5-10 concise and diverse search terms. "
-            "Focus on including a mix of product types, long-tail keywords, and user intents (e.g., gifts, custom orders)."
-            "\n\n"
-            "Example for the topic 'vintage cameras':\n"
-            "{\n"
-            '  "search_terms": [\n'
-            '    "retro polaroid camera",\n'
-            '    "working 8mm film camera",\n'
-            '    "35mm point and shoot camera",\n'
-            '    "vintage kodak brownie camera",\n'
-            '    "camera collector gift",\n'
-            '    "antique folding camera"\n'
-            '  ]\n'
-            "}"
-        )
-        user_prompt = f"Topic: {topic}"
-
-        try:
-            # Print payload for debugging
-            request_payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                "response_format": {"type": "json_object"},
-                "temperature": 1,
-                "max_completion_tokens": 2048
-            }
-            print(f"Sending the following payload to OpenAI:\n{json.dumps(request_payload, indent=2)}")
-
-            async with httpx.AsyncClient(timeout=45) as client:
-                response = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    json=request_payload
-                )
-                response.raise_for_status()
-                
-                # Log full response
-                full_response_json = response.json()
-                print("\n--- Full OpenAI API Response ---")
-                print(json.dumps(full_response_json, indent=2))
-                print("--- End of Full Response ---\n")
-                
-                content = full_response_json.get("choices", [{}])[0].get("message", {}).get("content", "")
-
-        except Exception as error:
-            print(f"LLM request failed: {error}")
-            return []
-
-        # --- PARSING LOGIC FIX ---
-        try:
-            data = json.loads(content)
-            
-            # OpenAI 'json_object' mode returns a dict: {"search_terms": [...]}
-            if isinstance(data, dict):
-                parsed = data.get("search_terms", [])
-            # Fallback in case a model returns a raw list
-            elif isinstance(data, list):
-                parsed = data
-            else:
-                parsed = []
-                
-        except json.JSONDecodeError:
-            print("LLM response was not valid JSON")
-            return []
-        # -------------------------
-
-        search_terms = [term.strip() for term in parsed if isinstance(term, str) and term.strip()]
-        return search_terms[:10]
-
     async def _send_command(self, command_type: str, payload: Dict[str, Any]) -> None:
         body = {"type": command_type, "payload": payload}
         try:
@@ -285,7 +176,6 @@ class ManualConsole:
 Available commands:
   state                 Show extension state via /state
   toggle <on|off>       Enable or disable agent control
-  ai_task "<topic>"       Generate search terms and run EXECUTE_SEARCH_TASK
   open <url>            Queue a basic OPEN_URL command
   run <TYPE> {json}     Queue any command with optional JSON payload
   help                  Show this help message

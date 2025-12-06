@@ -15,6 +15,7 @@ This guide explains how to validate the full Browser God agent ↔ extension flo
 
 ```bash
 uvicorn agent.main:app --reload --port 8000
+streamlit run .\dashboard\app.py
 ```
 
 2. Confirm health:

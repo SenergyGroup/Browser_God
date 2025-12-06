@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
-from pathlib import Path
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 
+from ..database import get_supabase_client
 from ..documentation import get_schema_documentation
 from ..messaging.bridge import ExtensionBridge
 from ..messaging.events import EventBroker
@@ -82,17 +83,13 @@ async def extension_socket(
 
 @router.websocket("/ws/data")
 async def data_stream(websocket: WebSocket) -> None:
-    """Stream scraped records to a JSONL file for each session."""
+    """Stream scraped records directly into Supabase."""
 
     await websocket.accept()
+    # Initialize Supabase client
+    supabase = get_supabase_client()
 
-    data_dir = Path("data_streams")
-    data_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
-    file_path = data_dir / f"scrape_session_{timestamp}.jsonl"
-
-    LOGGER.info("Data stream opened: %s", file_path)
-    file_handle = file_path.open("a", encoding="utf-8")
+    LOGGER.info("Data stream opened for ingestion")
 
     try:
         while True:
@@ -100,17 +97,91 @@ async def data_stream(websocket: WebSocket) -> None:
             try:
                 payload = json.loads(message)
             except json.JSONDecodeError:
-                payload = message
+                LOGGER.warning("Dropping non-JSON payload from data stream: %s", message)
+                continue
 
-            serialized = json.dumps(payload, ensure_ascii=False)
-            file_handle.write(f"{serialized}\n")
-            file_handle.flush()
+            # 1. Clean the Command ID
+            # The extension sends "UUID:Step:Action". We only want the UUID.
+            raw_id = payload.get("commandId")
+            clean_action_id = raw_id.split(":")[0] if raw_id else None
+
+            # Skip if ID is invalid or source isn't Etsy
+            if not clean_action_id or payload.get("source") != "etsy":
+                continue
+
+            # 2. Extract first image safely
+            image_url = None
+            image_urls = payload.get("image_urls")
+            if isinstance(image_urls, list) and image_urls:
+                first_image = image_urls[0]
+                if isinstance(first_image, str):
+                    image_url = first_image
+
+            # 3. Extract Nested Seller Data
+            seller_data = payload.get("seller") or {}
+
+            # 4. Map JSON fields to Database Columns
+            record = {
+                "id": str(uuid.uuid4()),
+                "action_id": clean_action_id,
+                
+                # --- NEW FIELDS YOU ADDED ---
+                "page_number": payload.get("page_number"),
+                "search_query": payload.get("search_query"),
+                "logging_key": payload.get("logging_key"),
+                "appears_event_data": payload.get("appears_event_data"),
+                
+                # Identity
+                "listing_id": payload.get("listing_id"),
+                "title": payload.get("title"),
+                "description": payload.get("description"),
+                "item_url": payload.get("url"),
+                
+                # Images: Store BOTH the single one and the array
+                "image_url": image_url,                  # The single one extracted earlier
+                "image_urls": payload.get("image_urls"), # The full array from JS
+                "image_alt_texts": payload.get("image_alt_texts"),
+                
+                # Pricing
+                "price_value": payload.get("price_value"),
+                "price_currency": payload.get("price_currency"),
+                "price_text": payload.get("price_text"),          # NEW
+                "currency_symbol": payload.get("currency_symbol"),# NEW
+                "original_price_value": payload.get("original_price_value"),
+                "original_price_text": payload.get("original_price_text"), # NEW
+                "discount_percent": payload.get("discount_percent"),
+                "is_on_sale": payload.get("is_on_sale"),
+                
+                # Social / Stats
+                "rating_value": payload.get("rating_value"),
+                "review_count": payload.get("rating_count"), # JS calls it rating_count, SQL calls it review_count
+                "favorites": payload.get("favorites"),
+                "position": payload.get("position"),
+                
+                # Arrays / Metadata
+                "tags": payload.get("tags") or [],
+                "badges": payload.get("badges") or [],
+                "category": payload.get("category"),
+                
+                # Seller
+                "seller_id": seller_data.get("id"),
+                "seller_name": seller_data.get("name"),
+
+                # Timestamp
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+            try:
+                supabase.table("scraped_items").insert(record).execute()
+                LOGGER.info(f"Inserted item {record['listing_id']} for action {clean_action_id}")
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Failed to insert scraped item", extra={"record": record})
+                
     except WebSocketDisconnect:
-        LOGGER.info("Data stream disconnected: %s", file_path)
+        LOGGER.info("Data stream disconnected")
     except Exception:  # noqa: BLE001
         LOGGER.exception("Data stream error")
     finally:
-        file_handle.close()
         await websocket.close()
 
 

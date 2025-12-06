@@ -33,6 +33,7 @@ let bridgeStatus = "disconnected";
 let agentBridge;
 const dataStreamer = new DataStreamer();
 let emergencyStopActive = false;
+let jobRequestInFlight = false;
 
 chrome.runtime.onInstalled.addListener(async () => {
   await chrome.storage.local.set({
@@ -120,6 +121,9 @@ async function handleControlMessage(message) {
     }
     case "emergencyShutdown": {
       return await handleEmergencyShutdown();
+    }
+    case "GET_NEXT_JOB": {
+      return await requestNextJobFromAgent();
     }
     default: {
       console.warn("Unknown message type", message?.type);
@@ -240,6 +244,26 @@ function matchesOrigin(url, originPattern) {
   return hostname === normalizedPattern || hostname.endsWith(`.${normalizedPattern}`);
 }
 
+async function requestNextJobFromAgent() {
+  if (!agentBridge || jobRequestInFlight || emergencyStopActive) {
+    return { job_available: false };
+  }
+
+  jobRequestInFlight = true;
+  try {
+    const response = await agentBridge.requestNextJob();
+    if (response?.job_available && response.command) {
+      await handleIncomingCommand(response.command);
+    }
+    return response;
+  } catch (error) {
+    console.error("Failed to fetch next job", error);
+    return { job_available: false, error: error?.message || "REQUEST_FAILED" };
+  } finally {
+    jobRequestInFlight = false;
+  }
+}
+
 async function processQueue() {
   if (processing || emergencyStopActive) {
     return;
@@ -253,7 +277,7 @@ async function processQueue() {
     const result = await executeCommand(command);
     await storeResult(command, result);
     await logCommand(command, result.status, result.errorCode);
-    notifyResult(command, result);
+    await notifyResult(command, result);
     await broadcastExtensionState();
   }
   processing = false;
@@ -531,7 +555,7 @@ async function detectActivePageNumber(tabId) {
   } catch (error) {
     console.warn("Failed to detect active page", error);
   }
-  return null;
+  return 1;
 }
 
 async function waitForTabSlot(maxConcurrentTabs) {
@@ -572,7 +596,7 @@ async function executeActionCommand(command) {
   const actionResult = await executeCommand(command);
   await storeResult(command, actionResult);
   await logCommand(command, actionResult.status, actionResult.errorCode);
-  notifyResult(command, actionResult);
+  await notifyResult(command, actionResult);
   await broadcastExtensionState();
   return actionResult;
 }
@@ -810,10 +834,13 @@ async function logCommand(command, status, errorCode) {
   await chrome.storage.local.set({ logs });
 }
 
-function notifyResult(command, result) {
+async function notifyResult(command, result) {
   chrome.runtime.sendMessage({ type: "commandResult", commandId: command.id, result }).catch(() => {});
   if (agentBridge) {
     agentBridge.emit({ type: "commandResult", commandId: command.id, result });
+  }
+  if (result?.status === "completed" && !emergencyStopActive) {
+    await requestNextJobFromAgent();
   }
 }
 
