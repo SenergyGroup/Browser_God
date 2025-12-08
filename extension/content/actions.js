@@ -58,7 +58,14 @@ function safeParseJsonAttribute(value) {
 
 function extractSchemas({ types = ["application/ld+json"] }) {
   if (isEtsySearchPage()) {
-    return { ok: true, data: { listings: extractEtsyListings() } };
+    // UPDATED: Now returns listings AND the total market count
+    return { 
+      ok: true, 
+      data: { 
+        listings: extractEtsyListings(),
+        totalCount: detectTotalResultsCount() // <--- NEW CALL
+      } 
+    };
   }
 
   const blocks = [];
@@ -400,4 +407,37 @@ function detectActivePageNumber() {
   // 3. STRATEGY: Default
   console.log("[Content Script] No page number detected. Defaulting to 1.");
   return 1;
+}
+
+// --- NEW FUNCTION TO CAPTURE TOTAL RESULTS ---
+function detectTotalResultsCount() {
+  // 1. JSON-LD Strategy (Most Reliable)
+  const jsonScripts = document.querySelectorAll('script[type="application/ld+json"]');
+  for (const script of jsonScripts) {
+    try {
+      const data = JSON.parse(script.innerText);
+      const checkObject = (obj) => {
+        if (obj && obj.numberOfItems) return parseInt(obj.numberOfItems);
+        return null;
+      };
+
+      if (Array.isArray(data)) {
+        for (const item of data) {
+          const res = checkObject(item);
+          if (res) return res;
+        }
+      } else {
+        const res = checkObject(data);
+        if (res) return res;
+      }
+    } catch (e) { /* ignore parse errors */ }
+  }
+
+  // 2. Fallback: Screen Reader Text
+  const srText = document.querySelector('.wt-screen-reader-only, .screen-reader-only');
+  if (srText && srText.innerText.includes('results')) {
+    return parseInt(srText.innerText.replace(/\D/g, ''));
+  }
+
+  return 0; // Could not find count
 }

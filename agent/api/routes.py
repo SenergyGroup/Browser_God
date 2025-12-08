@@ -105,8 +105,32 @@ async def data_stream(websocket: WebSocket) -> None:
             raw_id = payload.get("commandId")
             clean_action_id = raw_id.split(":")[0] if raw_id else None
 
-            # Skip if ID is invalid or source isn't Etsy
-            if not clean_action_id or payload.get("source") != "etsy":
+            if not clean_action_id:
+                continue
+
+            # ==========================================================
+            # NEW: BRANCHING LOGIC
+            # ==========================================================
+            record_type = payload.get("recordType", "LISTING") # Default to LISTING if missing
+
+            # --- BRANCH A: METADATA (Total Results Count) ---
+            if record_type == "SEARCH_METADATA":
+                total_count = payload.get("total_results_count")
+                if total_count is not None:
+                    try:
+                        LOGGER.info(f"📉 Updating Metadata: Action {clean_action_id} has {total_count} results")
+                        supabase.table("search_actions").update({
+                            "total_results_count": total_count,
+                            # Optional: Set status to PROCESSING to indicate we found data
+                            "status": "PROCESSING"
+                        }).eq("id", clean_action_id).execute()
+                    except Exception: # noqa: BLE001
+                        LOGGER.exception(f"Failed to update metadata for action {clean_action_id}")
+                continue # Skip the rest of the loop for metadata
+
+            # --- BRANCH B: LISTING ITEMS (Your Existing Logic) ---
+            # Check source only for listings
+            if payload.get("source") != "etsy":
                 continue
 
             # 2. Extract first image safely
@@ -125,7 +149,7 @@ async def data_stream(websocket: WebSocket) -> None:
                 "id": str(uuid.uuid4()),
                 "action_id": clean_action_id,
                 
-                # --- NEW FIELDS YOU ADDED ---
+                # Metadata
                 "page_number": payload.get("page_number"),
                 "search_query": payload.get("search_query"),
                 "logging_key": payload.get("logging_key"),
@@ -138,23 +162,23 @@ async def data_stream(websocket: WebSocket) -> None:
                 "item_url": payload.get("url"),
                 
                 # Images: Store BOTH the single one and the array
-                "image_url": image_url,                  # The single one extracted earlier
-                "image_urls": payload.get("image_urls"), # The full array from JS
+                "image_url": image_url,                  
+                "image_urls": payload.get("image_urls"), 
                 "image_alt_texts": payload.get("image_alt_texts"),
                 
                 # Pricing
                 "price_value": payload.get("price_value"),
                 "price_currency": payload.get("price_currency"),
-                "price_text": payload.get("price_text"),          # NEW
-                "currency_symbol": payload.get("currency_symbol"),# NEW
+                "price_text": payload.get("price_text"),          
+                "currency_symbol": payload.get("currency_symbol"),
                 "original_price_value": payload.get("original_price_value"),
-                "original_price_text": payload.get("original_price_text"), # NEW
+                "original_price_text": payload.get("original_price_text"), 
                 "discount_percent": payload.get("discount_percent"),
                 "is_on_sale": payload.get("is_on_sale"),
                 
                 # Social / Stats
                 "rating_value": payload.get("rating_value"),
-                "review_count": payload.get("rating_count"), # JS calls it rating_count, SQL calls it review_count
+                "review_count": payload.get("rating_count"), 
                 "favorites": payload.get("favorites"),
                 "position": payload.get("position"),
                 
@@ -173,7 +197,8 @@ async def data_stream(websocket: WebSocket) -> None:
 
             try:
                 supabase.table("scraped_items").insert(record).execute()
-                LOGGER.info(f"Inserted item {record['listing_id']} for action {clean_action_id}")
+                # Debug logging - reduce noise in production
+                # LOGGER.info(f"Inserted item {record['listing_id']} for action {clean_action_id}")
             except Exception:  # noqa: BLE001
                 LOGGER.exception("Failed to insert scraped item", extra={"record": record})
                 

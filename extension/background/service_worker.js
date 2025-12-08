@@ -394,7 +394,7 @@ async function handleExecuteSearchTask(command, settings) {
     return { status: "failed", errorCode: ERROR_CODES.INVALID_COMMAND };
   }
 
-  const maxPagesPerTerm = MAX_PAGES_PER_TERM;
+  const maxPagesPerTerm = 2 // MAX_PAGES_PER_TERM;
 
   console.log(
     `[Search Task ${command.id}] Starting task with ${searchTerms.length} terms.`
@@ -713,6 +713,22 @@ async function handleExtractSchema(command) {
 
     const listings = Array.isArray(response.data?.listings) ? response.data.listings : [];
     const schemas = Array.isArray(response.data?.schemas) ? response.data.schemas : [];
+    
+    // --- NEW: Handle Total Count Metadata ---
+    const totalCount = response.data?.totalCount || 0;
+    
+    if (totalCount > 0) {
+      // Stream a special "METADATA" record to your backend
+      dataStreamer.sendRecord({
+        recordType: "SEARCH_METADATA",
+        commandId: command.id,
+        total_results_count: totalCount,
+        timestamp: new Date().toISOString()
+      });
+      console.log(`[Metadata] Streamed total market count: ${totalCount}`);
+    }
+    // ----------------------------------------
+
     const validatedListings = [];
     const rejectedListings = [];
 
@@ -727,7 +743,13 @@ async function handleExtractSchema(command) {
     });
 
     validatedListings.forEach((record) => {
-      dataStreamer.sendRecord({ commandId: command.id, tabId, ...record });
+      // Ensure we explicitly tag these as listing records
+      dataStreamer.sendRecord({ 
+        recordType: "LISTING", // Helper tag for backend
+        commandId: command.id, 
+        tabId, 
+        ...record 
+      });
     });
 
     return {
@@ -735,7 +757,8 @@ async function handleExtractSchema(command) {
       itemsStreamed: validatedListings.length,
       totalListingsFound: listings.length,
       rejectedCount: rejectedListings.length,
-      schemaCount: schemas.length
+      schemaCount: schemas.length,
+      totalMarketCount: totalCount // Log this in results
     };
   } catch (error) {
     console.error("Schema extraction failed", error);
