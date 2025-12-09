@@ -2,7 +2,7 @@ Title
 Style chat widget as STYLE_NAME (aesthetics only)
 
 Context
-Inside the `Chats` folder there is a base chat template that includes HTML, CSS, JavaScript, and custom fields. This template, together with Streamlabs, provides all actual chat functionality and correct message behavior.
+Inside the `Chats` folder there is a base chat template that includes HTML, CSS, JavaScript, and custom fields. This template, together with Streamlabs, provides all actual chat functionality.
 
 In the `example_chats` folder there are fully functional examples in text form. Use them only as examples of how visual customization can be done without breaking behavior.
 
@@ -25,7 +25,7 @@ Respect these exact elements and hooks. Breaking any of these will break chat.
    - The element with `id="log"` and class `sl__chat__layout` is the core chat log container.
    - Do not rename, remove, or change its `id` or existing classes.
    - Do not add non message elements as direct children of `#log`.
-   - You may wrap `#log` in new parent containers for layout, framing, or background.
+   - You may wrap `#log` in new parent containers for layout, and you may style `#log` with CSS.
 
 2. Chat item template
    - Do not remove or rename `<script type="text/template" id="chatlist_item">`.
@@ -48,75 +48,33 @@ Respect these exact elements and hooks. Breaking any of these will break chat.
      - `document.addEventListener('onEventReceived', function (obj) { ... })`
    - Do not rename these events, listeners, or their function signatures.
    - Do not remove existing listeners or replace them with new ones.
-   - Do not change how messages are created, appended, or removed in JavaScript.
-   - You may add cosmetic behavior inside these existing handlers, but only for visual effects such as class toggles or animations.
-
-Core layout constraints
-The base template already has correct message behavior. Preserve that behavior and keep the chat area full width.
-
-1. `#log` must always:
-   - Fill the widget horizontally:
-     - Use `width: 100%` and `max-width: 100%` or equivalent.
-     - Do not introduce horizontal margins or transforms that make it narrower than the widget.
-   - Be vertically constrained to the widget:
-     - Position inside the widget so that messages can never render outside the visible widget rectangle.
-   - Keep all messages visually inside the widget:
-     - Use `overflow-x` and `overflow-y` to clip or scroll content inside the widget, never outside.
-
-2. Structural CSS on `#log` and direct children
-   For `#log` and `#log > div`, the base layout properties are considered part of the core contract.
-
-   - Do not change or remove:
-     - `position` (for example absolute or relative used by the base template)
-     - `top`, `right`, `bottom`, `left`
-     - `width` and any `max-width`
-     - `display` type (for example `display: table`)
-     - `table-layout` if present
-     - `overflow-x`, `overflow-y`
-   - You may adjust only cosmetic aspects:
-     - Background, borders, shadows, padding, font styling, colors.
-
-3. Parent wrappers
-   - You may wrap `#log` in additional containers to create frames, panels, or HUD elements.
-   - Style these wrappers to achieve the aesthetic without violating the structural rules above for `#log`.
+   - You may add cosmetic behavior inside these existing handlers, but you must not:
+     - Change how messages are fetched, inserted, sorted, or removed.
+     - Intercept or replace the existing message handling logic.
+   - If you are not certain a JavaScript change is purely cosmetic, do not make that change.
 
 Message layout behavior
 
-1. New messages must appear visually at the bottom of the visible message area and the list grows upward.
-2. The bottom of the visible area must always show the most recent message. Messages must never appear below the bottom edge of the widget at any time.
-3. Do not change how messages are fetched, inserted, sorted, or processed in JavaScript.
-4. Bottom alignment and stacking order must be preserved by respecting the base layout pattern on `#log` and its children. Do not change structural layout properties that the base template relies on for this behavior.
+1. New messages must appear visually at the bottom of the message area and the list grows upward.
+2. The view should keep the latest messages visible near the bottom by default unless the user manually scrolls up.
+3. Do not change how messages are fetched, inserted, or processed in JavaScript. Achieve bottom alignment and layout effects through CSS and safe layout changes on the existing structure.
 
+```
 Style brief
 Use this style brief as the source of all visual decisions.
 
-Overall style name: STYLE_NAME
-Short concept: ONE_OR_TWO_SENTENCES_DESCRIBING_THE_VIBE
+Overall style name: Retro Windows 95 Aesthetic Short concept: Nostalgic interface inspired by classic mid 90s operating systems.
 
-Examples of what you might put here for one project:
+Design direction These are high level hints, not strict rules.
 
-* Cozy late night terminal with soft neon glow
-* Bright arcade cabinet UI with score counters
-* Pixel fantasy RPG panel with gem accents
+Visual mood Clean desktop nostalgia with minimal gradients, flat UI panels, and period accurate interaction cues.
 
-Design direction
-These are high level hints, not strict rules.
+Palette hints Cool grays, muted blues, soft teals, off white window backgrounds, and a few saturated accent colors like cherry red and sunshine yellow.
 
-1. Visual mood
-   STYLE_MOOD_DESCRIPTION
-   Example: Nostalgic early console RPG, pixel hearts, health bars.
+Shape and components Rigid window frames with beveled edges, pixel crisp borders, rectangular buttons with 3D pressed states, title bars with icon and text, dropdowns, and classic checkboxes.
 
-2. Palette hints
-   STYLE_PALETTE_NOTES
-   Example: Soft purples, navy backgrounds, bright red accents.
-
-3. Shape and components
-   STYLE_COMPONENT_NOTES
-   Example: Boxy pixel borders, dialog boxes, chunky buttons.
-
-4. Extra creative flair
-   WOW_FACTOR_NOTES
-   Example: A small HUD strip with hearts and coins, playful pixel animation.
+Extra creative flair Subtle CRT softness, tiny system icons, mouse pointer trails, and optional startup chime references.
+```
 
 Quality and constraints
 Always
@@ -126,13 +84,13 @@ Always
 3. Visually differentiate user vs system vs bot messages with colors, borders, or alignment.
 4. Implement hover, focus, and active states using the chosen aesthetic where they make sense.
 5. Keep animations subtle, short (about 150 to 250 ms), and purely cosmetic.
-6. Respect the core widget integration contract, core layout constraints, and message behavior at all times.
+6. Respect the core widget integration contract above at all times.
 
 HTML rules
 Allowed:
 
 * Add wrapper elements around `#log` for framing, borders, or background.
-* Add wrapper elements inside the chat item root div for layout and decoration.
+* Add wrapper elements inside the chat item root div (for example inner containers for name, message, badges).
 * Add decorative spans, icons, or HUD like elements that do not change the meaning of existing data.
 
 Not allowed:
@@ -140,31 +98,17 @@ Not allowed:
 * Removing or renaming required elements, IDs, classes, data attributes, or template variables.
 * Changing the `id` or required classes of `#log`.
 * Changing the root element or data attributes of the chat item template.
-* Adding non message elements as direct children of `#log`.
 
 CSS rules
 This is your primary canvas.
 
-* Add a theme section at the top with CSS variables for:
-  - Background
-  - Primary
-  - Accent
-  - Text
-  - Success
-  - Error
-* Organize styles by sections such as:
-  - Layout
-  - Messages
-  - Meta (name and badges)
-  - HUD and decorative elements
-  - Utilities
-* Respect structural properties of the base layout for `#log` and `#log > div`:
-  - Do not change `position`, `display`, `width`, `max-width`, `overflow`, or positioning offsets for these elements.
-  - Use backgrounds, borders, border radius, box shadows, text styles, padding, and margins on inner wrappers to express the aesthetic.
-* Ensure:
-  - `#log` uses 100% of the widget width.
-  - All messages remain visually inside the widget area.
-  - No CSS causes messages to appear below the widget or outside its visible frame.
+* Add a theme section at the top with CSS variables for background, primary, accent, text, success, error.
+* Organize styles by sections such as layout, messages, meta (name and badges), hud, utilities.
+* Use CSS to achieve:
+  - Bottom aligned message stack.
+  - Borders, frames, and backgrounds that express STYLE_NAME.
+  - Animations for message entry and exit that remain cosmetic.
+* Avoid unnecessary complexity and keep selectors clear and maintainable.
 
 JavaScript rules
 Visual JavaScript enhancements are allowed only when they are cosmetic and cannot affect chat logic or Streamlabs integration.
@@ -203,7 +147,6 @@ Use the existing custom fields as theme controls rather than hard coding values.
 * Map sliders to font size, padding, spacing, or animation timing.
 * Map dropdowns to layout or variant choices within the same style.
 * Map font pickers to the main typeface for names and messages.
-* Map image and sound inputs to optional decorative or feedback elements that do not change functionality.
 
 Do not change the structure of the custom fields object. You may adjust labels and default values to better fit STYLE_NAME.
 
@@ -212,15 +155,14 @@ Output requirements
 1. Return complete updated HTML, CSS, and custom fields files inside the `Chats` folder, plus minimal JavaScript only if truly needed for visuals.
 2. Preserve directory structure and file names.
 3. The widget must remain functionally identical and fully compatible with Streamlabs. The changes must be visual only.
-4. The `#log` container, chat item template, placeholders, structural layout properties, and integration hooks must satisfy the core widget integration contract and core layout constraints.
+4. The `#log` container, chat item template, placeholders, and integration hooks must satisfy the core widget integration contract.
 
 Self check before output
 Before finalizing, review your result and confirm:
 
 1. Functionality matches the original.
 2. All IDs, classes, data attributes, template variables, and integration hooks remain intact and correctly named.
-3. Structural layout properties for `#log` and `#log > div` are unchanged, and `#log` fills the widget width.
-4. New messages appear at the visual bottom of the chat area, never below the widget edge, and the list grows upward.
-5. The aesthetic clearly matches STYLE_NAME and the direction provided in the style brief.
-6. The result feels like a polished, production ready visual skin with real wow factor.
-7. Any JavaScript you added is purely cosmetic and can be removed without affecting chat behavior.
+3. `#log` still receives only chat message items as direct children, and new messages appear at the visual bottom.
+4. The aesthetic clearly matches STYLE_NAME and the direction provided in the style brief.
+5. The result feels like a polished, production ready visual skin with real wow factor.
+6. Any JavaScript you added is purely cosmetic and can be removed without affecting chat behavior.
